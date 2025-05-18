@@ -21,8 +21,8 @@
 #define diep(msg) {logp("ERROR: "msg); exit(-1);}
 
 // constants
-#define RECV_BUFFER_CAP 2048 // NOTE: buffer size might not be good
-#define SEND_BUFFER_CAP 2048 // NOTE: buffer size might not be good
+#define RECV_BUFFER_CAP 8192
+#define SEND_BUFFER_CAP 8192
 
 // globals
 int _server_fd = 0;
@@ -176,6 +176,17 @@ main(void)
         ssize_t recv_buf_size = 0;
         recv_buf_size = recv(client_fd, recv_buf, RECV_BUFFER_CAP, 0); // TODO: unfinished reads
         if(recv_buf_size == 0) {goto EXIT_REQUEST;}
+        if(recv_buf_size == RECV_BUFFER_CAP) // NOTE: we do not support dynamic size request
+        {
+            do // 'finish' read
+            {
+                recv_buf_size = recv(client_fd, recv_buf, RECV_BUFFER_CAP, 0);
+                if(recv_buf_size == 0) {goto EXIT_REQUEST;}
+            } while(recv_buf_size == RECV_BUFFER_CAP);
+            char *request_denied = "HTTP/1.1 417 Expectation Failed\r\n";
+            socket_send_all(client_fd, request_denied, strlen(request_denied));
+            goto EXIT_REQUEST;
+        }
         if(recv_buf_size < 0) {diep("recv");}
         char *recv_buf_end = recv_buf + recv_buf_size;
 
