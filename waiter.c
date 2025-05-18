@@ -26,9 +26,9 @@
 
 // globals
 int _server_fd = 0;
-char INDEX_FILENAME[] = "index.html";
-char ERROR_404_FILENAME[] = "404.html";
-char *MIME_TYPES[][2] = {
+char _file_index[] = "index.html";
+char _file_error_404[] = "404.html";
+char *_mime_types[][2] = {
     {"html", "text/html"},
     {"js", "text/javascript"},
     {"css", "text/css"},
@@ -42,12 +42,12 @@ mime_type(char const *restrict filename)
     if(ext == NULL) {return(NULL);}
     ext++;
     for(size_t i = 0;
-            i < sizeof(MIME_TYPES) / sizeof(*MIME_TYPES);
+            i < sizeof(_mime_types) / sizeof(*_mime_types);
             i++)
     {
-        if(strcmp(ext, MIME_TYPES[i][0]) == 0)
+        if(strcmp(ext, _mime_types[i][0]) == 0)
         {
-            return(MIME_TYPES[i][1]);
+            return(_mime_types[i][1]);
         }
     }
     return(NULL);
@@ -57,7 +57,7 @@ char const *
 mime_type_default(char const *restrict filename)
 {
     char const *mime = mime_type(filename);
-    return(mime == NULL ? MIME_TYPES[0][1] : mime);
+    return(mime == NULL ? _mime_types[0][1] : mime);
 }
 
 void
@@ -155,6 +155,11 @@ main(void)
 
     // we only serve from the public directory
     chdir("public/");
+    char curr_dir[PATH_MAX] = {0};
+    if(getcwd(curr_dir, PATH_MAX) == NULL)
+    {
+        diep("failed to get current directory");
+    }
 
     // accept loop
     while(1)
@@ -219,18 +224,29 @@ main(void)
         char temp_filename[PATH_MAX] = {0};
         url++;
         size_t url_size = strlen(url);
-        if(url_size == 0) {url = INDEX_FILENAME;}
+        if(url_size == 0) {url = _file_index;}
         else if(url[url_size - 1] == '/')
         {
             memcpy(temp_filename, url, url_size);
-            memcpy(temp_filename + url_size, INDEX_FILENAME, sizeof(INDEX_FILENAME)); // NOTE: has \0 at the end
+            memcpy(temp_filename + url_size, _file_index, sizeof(_file_index)); // NOTE: has \0 at the end
             url = temp_filename;
         }
         else if(!file_is_reg(url))
         {
             memcpy(temp_filename, url, url_size);
             temp_filename[url_size] = '/';
-            memcpy(temp_filename + url_size + 1, INDEX_FILENAME, sizeof(INDEX_FILENAME)); // NOTE: has \0 at the end
+            memcpy(temp_filename + url_size + 1, _file_index, sizeof(_file_index)); // NOTE: has \0 at the end
+            url = temp_filename;
+        }
+
+        // prevent parent directory traversal
+        realpath(url, temp_filename);
+        if(memcmp(curr_dir, temp_filename, strlen(curr_dir)) != 0)
+        {
+            url = _file_error_404;
+        }
+        else
+        {
             url = temp_filename;
         }
         log("NEW URL: %s\n", url);
@@ -245,7 +261,9 @@ main(void)
         size_t send_buf_offset = 0;
         if(fd < 0)
         {
-            url = ERROR_404_FILENAME;
+            if(url == _file_error_404) {log("missing 404 file"); goto EXIT_REQUEST;}
+
+            url = _file_error_404;
             fd = open(url, O_RDONLY);
             if(fd < 0) {log("missing 404 file"); goto EXIT_REQUEST;}
 
