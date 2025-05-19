@@ -115,10 +115,10 @@ file_is_reg(char *filename)
 }
 
 void
-send_missing_404(int fd)
+send_default_404_msg(int fd)
 {
     log("missing 404 file\n");
-    char buffer[] = "HTTP/1.1 404 NOT FOUND\r\n\r\n";
+    char buffer[] = "HTTP/1.1 404 NOT FOUND\r\n\r\n404 page not found";
     socket_send_all(fd, buffer, sizeof(buffer) - 1);
 }
 
@@ -336,11 +336,11 @@ main(void)
         // check 404
         if(fd < 0)
         {
-            if(url == _file_error_404) {send_missing_404(client_fd); goto EXIT_REQUEST;}
+            if(url == _file_error_404) {send_default_404_msg(client_fd); goto EXIT_REQUEST;}
 
             url = _file_error_404;
             fd = open(url, O_RDONLY);
-            if(fd < 0) {send_missing_404(client_fd); goto EXIT_REQUEST;}
+            if(fd < 0) {send_default_404_msg(client_fd); goto EXIT_REQUEST;}
 
             file_size = file_get_size(url);
             header_type = "HTTP/1.1 404 NOT FOUND\r\n";
