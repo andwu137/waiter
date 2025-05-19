@@ -5,6 +5,7 @@
 
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <glob.h>
 #include <linux/limits.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -19,6 +20,7 @@
 #define logp(msg) perror(PROGRAM_NAME": "msg)
 #define die(...) {log("ERROR: "__VA_ARGS__); putc('\n', stderr); exit(-1);}
 #define diep(msg) {logp("ERROR: "msg); exit(-1);}
+#define static_array_size(arr) sizeof(arr) / sizeof(*(arr))
 
 // constants
 #define RECV_BUFFER_CAP 8192
@@ -33,6 +35,9 @@ char *_mime_types[][2] = {
     {"js", "text/javascript"},
     {"css", "text/css"},
 };
+char *_blacklisted_config[] = {
+    ".git/",
+};
 
 // functions
 char const *
@@ -42,7 +47,7 @@ mime_type(char const *restrict filename)
     if(ext == NULL) {return(NULL);}
     ext++;
     for(size_t i = 0;
-            i < sizeof(_mime_types) / sizeof(*_mime_types);
+            i < static_array_size(_mime_types);
             i++)
     {
         if(strcmp(ext, _mime_types[i][0]) == 0)
@@ -109,6 +114,14 @@ file_is_reg(char *filename)
     return (sb.st_mode & S_IFMT) == S_IFREG;
 }
 
+void
+send_missing_404(int fd)
+{
+    log("missing 404 file\n");
+    char buffer[] = "HTTP/1.1 404 NOT FOUND\r\n\r\n";
+    socket_send_all(fd, buffer, sizeof(buffer));
+}
+
 int
 main(void)
 {
@@ -159,6 +172,17 @@ main(void)
     if(getcwd(curr_dir, PATH_MAX) == NULL)
     {
         diep("failed to get current directory");
+    }
+
+    // setup blacklist paths
+    glob_t blacklisted = {0};
+    for(size_t i = 0;
+            i < static_array_size(_blacklisted_config);
+            i++)
+    {
+        int flags = GLOB_MARK | GLOB_NOSORT;
+        if(i != 0) {flags |= GLOB_APPEND;}
+        glob(_blacklisted_config[i], flags, NULL, &blacklisted);
     }
 
     // accept loop
@@ -217,7 +241,7 @@ main(void)
         }
         if(strcmp(method, "GET") != 0) {log("failed: was not GET\n"); goto EXIT_REQUEST;}
         if(strcmp(protocol, "HTTP/1.1") != 0) {log("failed: was not HTTP/1.1\n"); goto EXIT_REQUEST;}
-        log("URL: %s\n", url);
+        log(">>> URL: %s\n", url);
         if(params != url) {log("PARAMS: %s\n", params);}
 
         // url verification
@@ -238,16 +262,34 @@ main(void)
             memcpy(temp_filename + url_size + 1, _file_index, sizeof(_file_index)); // NOTE: has \0 at the end
             url = temp_filename;
         }
-
-        // prevent parent directory traversal
-        realpath(url, temp_filename);
-        if(memcmp(curr_dir, temp_filename, strlen(curr_dir)) != 0)
-        {
-            url = _file_error_404;
-        }
         else
         {
-            url = temp_filename;
+            // blacklisted prefixes
+            uint8_t valid = 1;
+            for(size_t i = 0;
+                    i < blacklisted.gl_pathc;
+                    i++)
+            {
+                if(strstr(url, blacklisted.gl_pathv[i]) == url)
+                {
+                    url = _file_error_404;
+                    valid = 0;
+                }
+            }
+
+            // prevent parent directory traversal
+            if(valid)
+            {
+                realpath(url, temp_filename);
+                if(memcmp(curr_dir, temp_filename, strlen(curr_dir)) != 0)
+                {
+                    url = _file_error_404;
+                }
+                else
+                {
+                    url = temp_filename;
+                }
+            }
         }
         log("NEW URL: %s\n", url);
 
@@ -255,21 +297,23 @@ main(void)
         int fd = open(url, O_RDONLY);
         size_t file_size = 0;
 
-        // send header
         char *header_type = "HTTP/1.1 200 OK";
-        char send_buf[SEND_BUFFER_CAP] = {0};
-        size_t send_buf_offset = 0;
+        // check 404
         if(fd < 0)
         {
-            if(url == _file_error_404) {log("missing 404 file"); goto EXIT_REQUEST;}
+            if(url == _file_error_404) {send_missing_404(client_fd); goto EXIT_REQUEST;}
 
             url = _file_error_404;
             fd = open(url, O_RDONLY);
-            if(fd < 0) {log("missing 404 file"); goto EXIT_REQUEST;}
+            if(fd < 0) {send_missing_404(client_fd); goto EXIT_REQUEST;}
 
             file_size = file_get_size(url);
             header_type = "HTTP/1.1 404 NOT FOUND\r\n";
         }
+
+        // send header
+        char send_buf[SEND_BUFFER_CAP] = {0};
+        size_t send_buf_offset = 0;
         file_size = file_get_size(url);
         send_buf_offset = snprintf(
                 send_buf, SEND_BUFFER_CAP,
@@ -293,6 +337,8 @@ main(void)
 EXIT_REQUEST:
         close(client_fd);
     }
+
+    globfree(&blacklisted);
 
     return(0);
 }
