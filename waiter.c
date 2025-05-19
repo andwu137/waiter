@@ -119,7 +119,31 @@ send_missing_404(int fd)
 {
     log("missing 404 file\n");
     char buffer[] = "HTTP/1.1 404 NOT FOUND\r\n\r\n";
-    socket_send_all(fd, buffer, sizeof(buffer));
+    socket_send_all(fd, buffer, sizeof(buffer) - 1);
+}
+
+uint8_t
+user_handle_url(
+        int client_fd,
+        char *restrict url,
+        size_t url_size)
+{
+    // lstrip '/'
+    url++;
+    url_size--;
+    // rstrip '/'
+    if(url[url_size - 1] == '/') {url[--url_size] = '\0';}
+
+    if(strcmp(url, "config") == 0 && 0)
+    {
+        char buffer[] =
+                "HTTP/1.1 200 OK\r\n"
+                "\r\n"
+                "<html><body>hi</body></html>";
+        socket_send_all(client_fd, buffer, sizeof(buffer) - 1);
+        return(1);
+    }
+    return(0);
 }
 
 int
@@ -244,10 +268,20 @@ main(void)
         log(">>> URL: %s\n", url);
         if(params != url) {log("PARAMS: %s\n", params);}
 
-        // url verification
-        char temp_filename[PATH_MAX] = {0};
-        url++;
+        /* handle request */
         size_t url_size = strlen(url);
+        if(user_handle_url(client_fd, url, url_size))
+        {
+            goto EXIT_REQUEST;
+        }
+
+        // strip leading slash
+        url_size--;
+        url++;
+
+        /* url verification */
+        char temp_filename[PATH_MAX] = {0};
+        // index handling
         if(url_size == 0) {url = _file_index;}
         else if(url[url_size - 1] == '/')
         {
@@ -291,9 +325,10 @@ main(void)
                 }
             }
         }
+        url_size = strlen(url);
         log("NEW URL: %s\n", url);
 
-        // find file
+        /* find file */
         int fd = open(url, O_RDONLY);
         size_t file_size = 0;
 
@@ -311,6 +346,7 @@ main(void)
             header_type = "HTTP/1.1 404 NOT FOUND\r\n";
         }
 
+        /* send */
         // send header
         char send_buf[SEND_BUFFER_CAP] = {0};
         size_t send_buf_offset = 0;
@@ -327,7 +363,7 @@ main(void)
         if(send_buf_offset > SEND_BUFFER_CAP) {die("failed to write header");}
         socket_send_all(client_fd, send_buf, send_buf_offset);
 
-        // handle file
+        // send file
         if(sendfile(client_fd, fd, NULL, file_size) < 0)
         {
             diep("failed to send file");
