@@ -118,7 +118,10 @@ void
 send_default_404_msg(int fd)
 {
     log("missing 404 file\n");
-    char buffer[] = "HTTP/1.1 404 NOT FOUND\r\n\r\n404 page not found";
+    char buffer[] =
+        "HTTP/1.1 404 NOT FOUND\r\n"
+        "\r\n"
+        "404 page not found";
     socket_send_all(fd, buffer, sizeof(buffer) - 1);
 }
 
@@ -264,7 +267,12 @@ main(void)
             if(isspace(*rest)) {*(rest++) = '\0'; break;}
         }
         if(strcmp(method, "GET") != 0) {log("failed: was not GET\n"); goto EXIT_REQUEST;}
-        if(strcmp(protocol, "HTTP/1.1") != 0) {log("failed: was not HTTP/1.1\n"); goto EXIT_REQUEST;}
+        if(strcmp(protocol, "HTTP/1.0") != 0
+                && strcmp(protocol, "HTTP/1.1") != 0)
+        {
+            log("failed: http protocol was not supported: %s\n", protocol);
+            goto EXIT_REQUEST;
+        }
         log(">>> URL: %s\n", url);
         if(params != url) {log("PARAMS: %s\n", params);}
 
@@ -343,7 +351,7 @@ main(void)
             if(fd < 0) {send_default_404_msg(client_fd); goto EXIT_REQUEST;}
 
             file_size = file_get_size(url);
-            header_type = "HTTP/1.1 404 NOT FOUND\r\n";
+            header_type = "HTTP/1.1 404 NOT FOUND";
         }
 
         /* send */
