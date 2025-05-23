@@ -130,13 +130,13 @@ void
 send_default_404_msg(int fd)
 {
     log("missing 404 file\n");
-    char buffer[] =
+    char *buffer =
         "HTTP/1.1 404 NOT FOUND\r\n"
         "Content-Type: text/plain\r\n"
         "Content-Length: 18\r\n" // WARN: relies on the string length below
         "\r\n"
         "404 page not found";
-    socket_send_all(fd, buffer, sizeof(buffer) - 1);
+    socket_send_all(fd, buffer, strlen(buffer));
 }
 
 void
@@ -165,13 +165,13 @@ user_handle_url(
 
     if(strcmp(url, "config") == 0 && 0)
     {
-        char buffer[] =
+        char *buffer =
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: text/html\r\n"
                 "Content-Length: 28\r\n" // WARN: relies on the string length below
                 "\r\n"
                 "<html><body>hi</body></html>";
-        socket_send_all(client_fd, buffer, sizeof(buffer) - 1);
+        socket_send_all(client_fd, buffer, strlen(buffer));
         return(1);
     }
     return(0);
@@ -354,7 +354,7 @@ int
 main(void)
 {
     uint16_t const server_port = 8080;
-    int const server_queue_size = 10;
+    int const server_queue_size = 4096;
     struct sockaddr_in server_addr = {0};
 
     // get socket
