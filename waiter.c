@@ -127,6 +127,18 @@ send_default_404_msg(int fd)
     socket_send_all(fd, buffer, sizeof(buffer) - 1);
 }
 
+void
+send_request_denied(int fd)
+{
+    char *request_denied =
+        "HTTP/1.1 417 Expectation Failed\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: 29\r\n" // WARN: relies on the string length below
+        "\r\n"
+        "unable to read entire request";
+    socket_send_all(fd, request_denied, strlen(request_denied));
+}
+
 uint8_t
 user_handle_url(
         int client_fd,
@@ -243,13 +255,7 @@ main(void)
                 recv_buf_size = recv(client_fd, recv_buf, RECV_BUFFER_CAP, 0);
                 if(recv_buf_size == 0) {goto EXIT_REQUEST;}
             } while(recv_buf_size == RECV_BUFFER_CAP);
-            char *request_denied =
-                "HTTP/1.1 417 Expectation Failed\r\n"
-                "Content-Type: text/plain\r\n"
-                "Content-Length: 29\r\n" // WARN: relies on the string length below
-                "\r\n"
-                "unable to read entire request";
-            socket_send_all(client_fd, request_denied, strlen(request_denied));
+            send_request_denied(client_fd);
             goto EXIT_REQUEST;
         }
         if(recv_buf_size < 0) {diep("recv");}
@@ -261,20 +267,28 @@ main(void)
         char *params = NULL;
         char *protocol = NULL;
         char *rest = NULL;
+
         for(url = method; url < recv_buf_end; url++)
         {
             if(*url == ' ') {*(url++) = '\0'; break;}
         }
+        if(url == recv_buf_end) {send_request_denied(client_fd); goto EXIT_REQUEST;}
+
         params = url;
         for(protocol = url; protocol < recv_buf_end; protocol++)
         {
             if(*protocol == '?') {*(protocol++) = '\0'; params = protocol;}
             if(*protocol == ' ') {*(protocol++) = '\0'; break;}
         }
+        if(params == recv_buf_end) {send_request_denied(client_fd); goto EXIT_REQUEST;}
+
         for(rest = protocol; rest < recv_buf_end; rest++)
         {
             if(isspace(*rest)) {*(rest++) = '\0'; break;}
         }
+        if(rest == recv_buf_end) {send_request_denied(client_fd); goto EXIT_REQUEST;}
+
+        // verify request parameters
         if(strcmp(method, "GET") != 0) {log("failed: was not GET\n"); goto EXIT_REQUEST;}
         if(strcmp(protocol, "HTTP/1.0") != 0
                 && strcmp(protocol, "HTTP/1.1") != 0)
