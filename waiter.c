@@ -204,7 +204,7 @@ main(void)
     {
         diep("failed to listen to server socket");
     }
-    log("Server listening on port\n");
+    log("Server listening on port %d\n", server_port);
 
     // make sure to close the server
     atexit(close_server);
