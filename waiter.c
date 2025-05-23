@@ -120,6 +120,8 @@ send_default_404_msg(int fd)
     log("missing 404 file\n");
     char buffer[] =
         "HTTP/1.1 404 NOT FOUND\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: 18\r\n" // WARN: relies on the string length below
         "\r\n"
         "404 page not found";
     socket_send_all(fd, buffer, sizeof(buffer) - 1);
@@ -141,6 +143,8 @@ user_handle_url(
     {
         char buffer[] =
                 "HTTP/1.1 200 OK\r\n"
+                "Content-Type: text/html\r\n"
+                "Content-Length: 28\r\n" // WARN: relies on the string length below
                 "\r\n"
                 "<html><body>hi</body></html>";
         socket_send_all(client_fd, buffer, sizeof(buffer) - 1);
@@ -239,7 +243,12 @@ main(void)
                 recv_buf_size = recv(client_fd, recv_buf, RECV_BUFFER_CAP, 0);
                 if(recv_buf_size == 0) {goto EXIT_REQUEST;}
             } while(recv_buf_size == RECV_BUFFER_CAP);
-            char *request_denied = "HTTP/1.1 417 Expectation Failed\r\n";
+            char *request_denied =
+                "HTTP/1.1 417 Expectation Failed\r\n"
+                "Content-Type: text/plain\r\n"
+                "Content-Length: 29\r\n" // WARN: relies on the string length below
+                "\r\n"
+                "unable to read entire request";
             socket_send_all(client_fd, request_denied, strlen(request_denied));
             goto EXIT_REQUEST;
         }
