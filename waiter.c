@@ -36,6 +36,20 @@ struct thread_data
     sem_t notify;
 };
 
+// constant globals
+char _http_default_404[] =
+    "HTTP/1.1 404 NOT FOUND\r\n"
+    "Content-Type: text/plain\r\n"
+    "Content-Length: 18\r\n" // WARN: relies on the string length below
+    "\r\n"
+    "404 page not found";
+char _http_default_417[] =
+    "HTTP/1.1 417 Expectation Failed\r\n"
+    "Content-Type: text/plain\r\n"
+    "Content-Length: 29\r\n" // WARN: relies on the string length below
+    "\r\n"
+    "unable to read entire request";
+
 // globals
 char _curr_dir[PATH_MAX] = {0};
 int _server_fd = 0;
@@ -129,26 +143,13 @@ file_is_reg(char *filename)
 void
 send_default_404_msg(int fd)
 {
-    log("missing 404 file\n");
-    char *buffer =
-        "HTTP/1.1 404 NOT FOUND\r\n"
-        "Content-Type: text/plain\r\n"
-        "Content-Length: 18\r\n" // WARN: relies on the string length below
-        "\r\n"
-        "404 page not found";
-    socket_send_all(fd, buffer, strlen(buffer));
+    socket_send_all(fd, _http_default_404, sizeof(_http_default_404) - 1);
 }
 
 void
 send_request_denied(int fd)
 {
-    char *request_denied =
-        "HTTP/1.1 417 Expectation Failed\r\n"
-        "Content-Type: text/plain\r\n"
-        "Content-Length: 29\r\n" // WARN: relies on the string length below
-        "\r\n"
-        "unable to read entire request";
-    socket_send_all(fd, request_denied, strlen(request_denied));
+    socket_send_all(fd, _http_default_417, sizeof(_http_default_417) - 1);
 }
 
 uint8_t
