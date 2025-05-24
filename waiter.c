@@ -14,6 +14,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+
 #define PROGRAM_NAME "waiter"
 
 #define log(...) fprintf(stderr, PROGRAM_NAME": "__VA_ARGS__)
@@ -25,9 +28,12 @@
 // constants
 #define RECV_BUFFER_CAP 8192
 #define SEND_BUFFER_CAP 8192
+#define CERT_FILE "../certs/cert.pem" // NOTE(nick): path to certs & key go here
+#define PRIVATE_KEY_FILE "../certs/key.pem"
 
 // globals
 int _server_fd = 0;
+SSL_CTX *_ctx = NULL;
 char _file_index[] = "index.html";
 char _file_error_404[] = "404.html";
 char *_mime_types[][2] = {
@@ -66,8 +72,8 @@ mime_type_default(char const *restrict filename)
 }
 
 void
-socket_send_all(
-        int fd,
+socket_send_all_SSL(
+        SSL* ssl,
         char const *restrict buf,
         size_t buf_size)
 {
@@ -75,7 +81,7 @@ socket_send_all(
     do
     {
         ssize_t bsent = 0;
-        if((bsent = send(fd, buf + bytes_sent, buf_size - bytes_sent, 0)) < 0)
+        if((bsent = SSL_write(ssl, buf + bytes_sent, buf_size - bytes_sent)) <= 0)
         {
             diep("failed to send packet");
         }
@@ -88,6 +94,12 @@ close_server(void)
 {
     log("close server");
     close(_server_fd);
+}
+
+void
+close_SSL_context(void)
+{
+    SSL_CTX_free(_ctx);
 }
 
 size_t
@@ -115,7 +127,7 @@ file_is_reg(char *filename)
 }
 
 void
-send_default_404_msg(int fd)
+send_default_404_msg_SSL(SSL* ssl)
 {
     log("missing 404 file\n");
     char buffer[] =
@@ -124,11 +136,11 @@ send_default_404_msg(int fd)
         "Content-Length: 18\r\n" // WARN: relies on the string length below
         "\r\n"
         "404 page not found";
-    socket_send_all(fd, buffer, sizeof(buffer) - 1);
+    socket_send_all_SSL(ssl, buffer, sizeof(buffer) - 1);
 }
 
 void
-send_request_denied(int fd)
+send_request_denied_SSL(SSL* ssl)
 {
     char *request_denied =
         "HTTP/1.1 417 Expectation Failed\r\n"
@@ -136,12 +148,12 @@ send_request_denied(int fd)
         "Content-Length: 29\r\n" // WARN: relies on the string length below
         "\r\n"
         "unable to read entire request";
-    socket_send_all(fd, request_denied, strlen(request_denied));
+    socket_send_all_SSL(ssl, request_denied, strlen(request_denied));
 }
 
 uint8_t
-user_handle_url(
-        int client_fd,
+user_handle_url_SSL(
+        SSL* ssl,
         char *restrict url,
         size_t url_size)
 {
@@ -159,7 +171,7 @@ user_handle_url(
                 "Content-Length: 28\r\n" // WARN: relies on the string length below
                 "\r\n"
                 "<html><body>hi</body></html>";
-        socket_send_all(client_fd, buffer, sizeof(buffer) - 1);
+        socket_send_all_SSL(ssl, buffer, sizeof(buffer) - 1);
         return(1);
     }
     return(0);
@@ -168,7 +180,7 @@ user_handle_url(
 int
 main(void)
 {
-    uint16_t const server_port = 8080;
+    uint16_t const server_port = 4433;
     int const server_queue_size = 10;
     struct sockaddr_in server_addr = {0};
 
@@ -209,6 +221,25 @@ main(void)
     // make sure to close the server
     atexit(close_server);
 
+    // create and configure SSL context
+    if ((_ctx = SSL_CTX_new(TLS_server_method())) == NULL) {
+        diep("failed to create SSL context");
+    }
+    if (!SSL_CTX_use_certificate_chain_file(_ctx, CERT_FILE)) {
+        char errbuf[1024] = {0};
+        ERR_error_string(ERR_get_error(), errbuf);
+        log("certlink failed: %s\n", errbuf);
+        diep("failed to link certification to SSL context");
+    }
+    if (!SSL_CTX_use_PrivateKey_file(_ctx, PRIVATE_KEY_FILE, SSL_FILETYPE_PEM)) {
+        diep("failed to link private key to SSL context");
+    }
+    if (!SSL_CTX_check_private_key(_ctx)) {
+        diep("private key validity check failed");
+    }
+
+    atexit(close_SSL_context);
+
     // we only serve from the public directory
     chdir("public/");
     char curr_dir[PATH_MAX] = {0};
@@ -245,17 +276,30 @@ main(void)
             continue;
         }
 
+        // establish SSL connection
+        // TODO(nick): Error handling here; this is probably recoverable.
+        SSL *ssl = NULL;
+        if((ssl = SSL_new(_ctx)) == NULL) {
+            die("failed to create SSL connection struct");
+        }
+        if (SSL_set_fd(ssl, client_fd) != 1) {
+            die("failed to link client fd to SSL connection struct");
+        }
+        if (SSL_accept(ssl) <= 0) {
+            die("SSL connection rejected due bad client / internal error");
+        }
+
         ssize_t recv_buf_size = 0;
-        recv_buf_size = recv(client_fd, recv_buf, RECV_BUFFER_CAP, 0); // TODO: unfinished reads
+        recv_buf_size = SSL_read(ssl, recv_buf, RECV_BUFFER_CAP); // TODO: unfinished reads
         if(recv_buf_size == 0) {goto EXIT_REQUEST;}
         if(recv_buf_size == RECV_BUFFER_CAP) // NOTE: we do not support dynamic size request
         {
             do // 'finish' read
             {
-                recv_buf_size = recv(client_fd, recv_buf, RECV_BUFFER_CAP, 0);
+                recv_buf_size = SSL_read(ssl, recv_buf, RECV_BUFFER_CAP);
                 if(recv_buf_size == 0) {goto EXIT_REQUEST;}
             } while(recv_buf_size == RECV_BUFFER_CAP);
-            send_request_denied(client_fd);
+            send_request_denied_SSL(ssl);
             goto EXIT_REQUEST;
         }
         if(recv_buf_size < 0) {diep("recv");}
@@ -272,7 +316,7 @@ main(void)
         {
             if(*url == ' ') {*(url++) = '\0'; break;}
         }
-        if(url == recv_buf_end) {send_request_denied(client_fd); goto EXIT_REQUEST;}
+        if(url == recv_buf_end) {send_request_denied_SSL(ssl); goto EXIT_REQUEST;}
 
         params = url;
         for(protocol = url; protocol < recv_buf_end; protocol++)
@@ -280,13 +324,13 @@ main(void)
             if(*protocol == '?') {*(protocol++) = '\0'; params = protocol;}
             if(*protocol == ' ') {*(protocol++) = '\0'; break;}
         }
-        if(params == recv_buf_end) {send_request_denied(client_fd); goto EXIT_REQUEST;}
+        if(params == recv_buf_end) {send_request_denied_SSL(ssl); goto EXIT_REQUEST;}
 
         for(rest = protocol; rest < recv_buf_end; rest++)
         {
             if(isspace(*rest)) {*(rest++) = '\0'; break;}
         }
-        if(rest == recv_buf_end) {send_request_denied(client_fd); goto EXIT_REQUEST;}
+        if(rest == recv_buf_end) {send_request_denied_SSL(ssl); goto EXIT_REQUEST;}
 
         // verify request parameters
         if(strcmp(method, "GET") != 0) {log("failed: was not GET\n"); goto EXIT_REQUEST;}
@@ -301,7 +345,7 @@ main(void)
 
         /* handle request */
         size_t url_size = strlen(url);
-        if(user_handle_url(client_fd, url, url_size))
+        if(user_handle_url_SSL(ssl, url, url_size))
         {
             goto EXIT_REQUEST;
         }
@@ -367,11 +411,11 @@ main(void)
         // check 404
         if(fd < 0)
         {
-            if(url == _file_error_404) {send_default_404_msg(client_fd); goto EXIT_REQUEST;}
+            if(url == _file_error_404) {send_default_404_msg_SSL(ssl); goto EXIT_REQUEST;}
 
             url = _file_error_404;
             fd = open(url, O_RDONLY);
-            if(fd < 0) {send_default_404_msg(client_fd); goto EXIT_REQUEST;}
+            if(fd < 0) {send_default_404_msg_SSL(ssl); goto EXIT_REQUEST;}
 
             file_size = file_get_size(url);
             header_type = "HTTP/1.1 404 NOT FOUND";
@@ -392,17 +436,23 @@ main(void)
                 mime_type_default(url),
                 file_size);
         if(send_buf_offset > SEND_BUFFER_CAP) {die("failed to write header");}
-        socket_send_all(client_fd, send_buf, send_buf_offset);
+        socket_send_all_SSL(ssl, send_buf, send_buf_offset);
 
-        // send file
-        if(sendfile(client_fd, fd, NULL, file_size) < 0)
-        {
-            diep("failed to send file");
+        // TODO(nick): fail the file transfer & recover.
+        char *file_map = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
+        if(file_map == MAP_FAILED) {
+            diep("file mmap failed");
         }
         close(fd);
+        socket_send_all_SSL(ssl, file_map, file_size);
+        if(munmap(file_map, file_size)) {
+            diep("file munmap failed");
+        }
 
 EXIT_REQUEST:
         close(client_fd);
+        SSL_shutdown(ssl); // NOTE(nick): don't call if SSL has thrown SSL_ERROR_SYSCALL or SSL_ERROR_SSL.
+        SSL_free(ssl);
     }
 
     globfree(&blacklisted);
