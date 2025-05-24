@@ -466,19 +466,16 @@ main(
 
     // create and configure SSL context
     if ((_ctx = SSL_CTX_new(TLS_server_method())) == NULL) {
-        diep("failed to create SSL context");
+        die("failed to create SSL context");
     }
     if (!SSL_CTX_use_certificate_chain_file(_ctx, CERT_FILE)) {
-        char errbuf[1024] = {0};
-        ERR_error_string(ERR_get_error(), errbuf);
-        log("certlink failed: %s\n", errbuf);
-        diep("failed to link certification to SSL context");
+        die("failed to link certification to SSL context");
     }
     if (!SSL_CTX_use_PrivateKey_file(_ctx, PRIVATE_KEY_FILE, SSL_FILETYPE_PEM)) {
-        diep("failed to link private key to SSL context");
+        die("failed to link private key to SSL context");
     }
     if (!SSL_CTX_check_private_key(_ctx)) {
-        diep("private key validity check failed");
+        die("private key validity check failed");
     }
 
     atexit(close_SSL_context);
