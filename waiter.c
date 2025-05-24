@@ -30,10 +30,12 @@
 // constants
 #define RECV_BUFFER_CAP 8192
 #define SEND_BUFFER_CAP 8192
-#define CERT_FILE "../certs/cert.pem" // NOTE(nick): path to certs & key go here
-#define PRIVATE_KEY_FILE "../certs/key.pem"
 #define SEND_HEADER_CAP 2048
 #define THREAD_COUNT 16
+
+// certs
+#define CERT_FILE "../certs/cert.pem"
+#define PRIVATE_KEY_FILE "../certs/key.pem"
 
 // structs
 struct thread_data
