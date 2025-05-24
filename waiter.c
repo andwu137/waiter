@@ -16,6 +16,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+
 #define PROGRAM_NAME "waiter"
 
 #define log(...) fprintf(stderr, PROGRAM_NAME": "__VA_ARGS__)
@@ -28,6 +31,10 @@
 #define RECV_BUFFER_CAP 8192
 #define SEND_HEADER_CAP 2048
 #define THREAD_COUNT 16
+
+// certs
+#define CERT_FILE "../certs/cert.pem"
+#define PRIVATE_KEY_FILE "../certs/key.pem"
 
 // structs
 struct thread_data
@@ -49,10 +56,17 @@ char _http_default_417[] =
     "Content-Length: 29\r\n" // WARN: relies on the string length below
     "\r\n"
     "unable to read entire request";
+char _http_default_500[] =
+    "HTTP/1.1 500 Internal Error\r\n"
+    "Content-Type: text/plain\r\n"
+    "Content-Length: 27\r\n" // WARN: relies on the string length below
+    "\r\n"
+    "500 - internal server error";
 
 // globals
 char _curr_dir[PATH_MAX] = {0};
 int _server_fd = 0;
+SSL_CTX *_ssl_ctx = NULL;
 char _file_index[] = "index.html";
 char _file_error_404[] = "404.html";
 char *_mime_types[][2] = {
@@ -86,7 +100,8 @@ mime_type(
 }
 
 char const *
-mime_type_default(char const *restrict filename)
+mime_type_default(
+        char const *restrict filename)
 {
     char const *mime = mime_type(filename);
     return(mime == NULL ? _mime_types[0][1] : mime);
@@ -94,7 +109,7 @@ mime_type_default(char const *restrict filename)
 
 void
 socket_send_all(
-        int fd,
+        SSL* ssl,
         char const *restrict buf,
         size_t buf_size)
 {
@@ -102,7 +117,7 @@ socket_send_all(
     do
     {
         ssize_t bsent = 0;
-        if((bsent = send(fd, buf + bytes_sent, buf_size - bytes_sent, 0)) < 0)
+        if((bsent = SSL_write(ssl, buf + bytes_sent, buf_size - bytes_sent)) <= 0)
         {
             diep("failed to send packet");
         }
@@ -116,6 +131,13 @@ close_server(
 {
     log("close server");
     close(_server_fd);
+}
+
+void
+close_SSL_context(
+        void)
+{
+    SSL_CTX_free(_ssl_ctx);
 }
 
 size_t
@@ -146,31 +168,32 @@ file_is_reg(
 
 void
 send_default_404_msg(
-        int fd)
+        SSL* ssl)
 {
-    socket_send_all(fd, _http_default_404, sizeof(_http_default_404) - 1);
+    log("missing 404 file\n");
+    socket_send_all(ssl, _http_default_404, sizeof(_http_default_404));
 }
 
 void
 send_request_denied(
-        int fd)
+        SSL* ssl)
 {
-    socket_send_all(fd, _http_default_417, sizeof(_http_default_417) - 1);
+    socket_send_all(ssl, _http_default_417, sizeof(_http_default_417));
+}
+
+void send_internal_error(
+        SSL* ssl)
+{
+    socket_send_all(ssl, _http_default_500, sizeof(_http_default_500));
 }
 
 uint8_t
 user_handle_url(
-        int client_fd,
-        char *restrict url,
+        SSL* ssl,
+        const char *restrict url,
         size_t url_size)
 {
-    // lstrip '/'
-    url++;
-    url_size--;
-    // rstrip '/'
-    if(url[url_size - 1] == '/') {url[--url_size] = '\0';}
-
-    if(strcmp(url, "config") == 0 && 0)
+    if(strcmp(url, "/config") == 0 && 0)
     {
         char *buffer =
                 "HTTP/1.1 200 OK\r\n"
@@ -178,7 +201,7 @@ user_handle_url(
                 "Content-Length: 28\r\n" // WARN: relies on the string length below
                 "\r\n"
                 "<html><body>hi</body></html>";
-        socket_send_all(client_fd, buffer, strlen(buffer));
+        socket_send_all(ssl, buffer, strlen(buffer));
         return(1);
     }
     return(0);
@@ -189,22 +212,42 @@ handle_connection(
         void *data_ptr)
 {
     struct thread_data *data = data_ptr;
+    unsigned long ssl_error = 0;
+
     while(1)
     {
         sem_wait(&data->notify);
 
+        // init SSL connection
+        SSL *ssl;
+        if((ssl = SSL_new(_ssl_ctx)) == NULL)
+        {
+            log("failed to create SSL connection struct");
+            goto EXIT_REQUEST_CLOSE;
+        }
+        if (SSL_set_fd(ssl, data->client) != 1)
+        {
+            log("failed to link client fd to SSL connection struct");
+            goto EXIT_REQUEST;
+        }
+        if (SSL_accept(ssl) <= 0)
+        {
+            log("SSL connection rejected due bad client / internal error");
+            goto EXIT_REQUEST;
+        }
+
         char recv_buf[RECV_BUFFER_CAP] = {0};
         ssize_t recv_buf_size = 0;
-        recv_buf_size = recv(data->client, recv_buf, RECV_BUFFER_CAP, 0); // TODO: unfinished reads
+        recv_buf_size = SSL_read(ssl, recv_buf, RECV_BUFFER_CAP); // TODO: unfinished reads
         if(recv_buf_size == 0) {goto EXIT_REQUEST;}
         if(recv_buf_size == RECV_BUFFER_CAP) // NOTE: we do not support dynamic size request
         {
             do // 'finish' read
             {
-                recv_buf_size = recv(data->client, recv_buf, RECV_BUFFER_CAP, 0);
+                recv_buf_size = SSL_read(ssl, recv_buf, RECV_BUFFER_CAP);
                 if(recv_buf_size == 0) {goto EXIT_REQUEST;}
             } while(recv_buf_size == RECV_BUFFER_CAP);
-            send_request_denied(data->client);
+            send_request_denied(ssl);
             goto EXIT_REQUEST;
         }
         if(recv_buf_size < 0) {diep("recv");}
@@ -221,7 +264,7 @@ handle_connection(
         {
             if(*url == ' ') {*(url++) = '\0'; break;}
         }
-        if(url == recv_buf_end) {send_request_denied(data->client); goto EXIT_REQUEST;}
+        if(url == recv_buf_end) {send_request_denied(ssl); goto EXIT_REQUEST;}
 
         params = url;
         for(protocol = url; protocol < recv_buf_end; protocol++)
@@ -229,13 +272,13 @@ handle_connection(
             if(*protocol == '?') {*(protocol++) = '\0'; params = protocol;}
             if(*protocol == ' ') {*(protocol++) = '\0'; break;}
         }
-        if(params == recv_buf_end) {send_request_denied(data->client); goto EXIT_REQUEST;}
+        if(params == recv_buf_end) {send_request_denied(ssl); goto EXIT_REQUEST;}
 
         for(rest = protocol; rest < recv_buf_end; rest++)
         {
             if(isspace(*rest)) {*(rest++) = '\0'; break;}
         }
-        if(rest == recv_buf_end) {send_request_denied(data->client); goto EXIT_REQUEST;}
+        if(rest == recv_buf_end) {send_request_denied(ssl); goto EXIT_REQUEST;}
 
         // verify request parameters
         if(strcmp(method, "GET") != 0) {log("failed: was not GET\n"); goto EXIT_REQUEST;}
@@ -250,7 +293,7 @@ handle_connection(
 
         /* handle request */
         size_t url_size = strlen(url);
-        if(user_handle_url(data->client, url, url_size))
+        if(user_handle_url(ssl, url, url_size))
         {
             goto EXIT_REQUEST;
         }
@@ -316,11 +359,11 @@ handle_connection(
         // check 404
         if(fd < 0)
         {
-            if(url == _file_error_404) {send_default_404_msg(data->client); goto EXIT_REQUEST;}
+            if(url == _file_error_404) {send_default_404_msg(ssl); goto EXIT_REQUEST;}
 
             url = _file_error_404;
             fd = open(url, O_RDONLY);
-            if(fd < 0) {send_default_404_msg(data->client); goto EXIT_REQUEST;}
+            if(fd < 0) {send_default_404_msg(ssl); goto EXIT_REQUEST;}
 
             file_size = file_get_size(url);
             header_type = "HTTP/1.1 404 NOT FOUND";
@@ -339,18 +382,39 @@ handle_connection(
                 header_type,
                 mime_type_default(url),
                 file_size);
-        if(send_buf_size > SEND_HEADER_CAP) {die("failed to write header");}
-        socket_send_all(data->client, send_buf, send_buf_size);
+        if(send_buf_size > SEND_HEADER_CAP)
+        {
+            log("failed to write header");
+            goto EXIT_REQUEST;
+        }
+        socket_send_all(ssl, send_buf, send_buf_size);
 
         // send file
-        if(sendfile(data->client, fd, NULL, file_size) < 0)
+        char *file_map = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
+        if(file_map == MAP_FAILED)
         {
-            diep("failed to send file");
+            logp("failed to mmap file");
+            goto EXIT_REQUEST;
         }
-        close(fd);
+        if(close(fd) < 0) {die("failed to close file fd");}
+        socket_send_all(ssl, file_map, file_size);
+        if(munmap(file_map, file_size))
+        {
+            die("file munmap failed");
+        }
+
 
 EXIT_REQUEST:
-        close(data->client);
+        ssl_error = ERR_get_error();
+        if (ssl_error != SSL_ERROR_SYSCALL && ssl_error != SSL_ERROR_SSL)
+        {
+            SSL_shutdown(ssl);
+        }
+
+        SSL_free(ssl);
+
+EXIT_REQUEST_CLOSE:
+        if(close(data->client) < 0) {die("failed to close client fd");}
         data->client = -1;
     }
 
@@ -401,6 +465,26 @@ main(
 
     // make sure to close the server
     atexit(close_server);
+
+    // create and configure SSL context
+    if ((_ssl_ctx = SSL_CTX_new(TLS_server_method())) == NULL)
+    {
+        die("failed to create SSL context");
+    }
+    if (!SSL_CTX_use_certificate_chain_file(_ssl_ctx, CERT_FILE))
+    {
+        die("failed to link certification to SSL context");
+    }
+    if (!SSL_CTX_use_PrivateKey_file(_ssl_ctx, PRIVATE_KEY_FILE, SSL_FILETYPE_PEM))
+    {
+        die("failed to link private key to SSL context");
+    }
+    if (!SSL_CTX_check_private_key(_ssl_ctx))
+    {
+        die("private key validity check failed");
+    }
+
+    atexit(close_SSL_context);
 
     // we only serve from the public directory
     chdir("public/");

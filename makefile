@@ -5,4 +5,4 @@ ifneq ($(STATIC),)
 endif
 
 all:
-	gcc $(FLAGS) -O2 waiter.c -o waiter
+	gcc $(FLAGS) -lssl -lcrypto -O2 waiter.c -o waiter
