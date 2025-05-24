@@ -67,7 +67,8 @@ glob_t _blacklisted = {0};
 
 // functions
 char const *
-mime_type(char const *restrict filename)
+mime_type(
+        char const *restrict filename)
 {
     char *ext = strrchr(filename, '.');
     if(ext == NULL) {return(NULL);}
@@ -110,14 +111,16 @@ socket_send_all(
 }
 
 void
-close_server(void)
+close_server(
+        void)
 {
     log("close server");
     close(_server_fd);
 }
 
 size_t
-file_get_size(char const *restrict filename)
+file_get_size(
+        char const *restrict filename)
 {
     struct stat sb;
     if(stat(filename, &sb) == -1)
@@ -128,7 +131,8 @@ file_get_size(char const *restrict filename)
 }
 
 uint8_t
-file_is_reg(char *filename)
+file_is_reg(
+        char const *restrict filename)
 {
     struct stat sb;
 
@@ -141,13 +145,15 @@ file_is_reg(char *filename)
 }
 
 void
-send_default_404_msg(int fd)
+send_default_404_msg(
+        int fd)
 {
     socket_send_all(fd, _http_default_404, sizeof(_http_default_404) - 1);
 }
 
 void
-send_request_denied(int fd)
+send_request_denied(
+        int fd)
 {
     socket_send_all(fd, _http_default_417, sizeof(_http_default_417) - 1);
 }
@@ -179,7 +185,8 @@ user_handle_url(
 }
 
 void *
-handle_connection(void *data_ptr)
+handle_connection(
+        void *data_ptr)
 {
     struct thread_data *data = data_ptr;
     while(1)
@@ -352,7 +359,8 @@ EXIT_REQUEST:
 }
 
 int
-main(void)
+main(
+        void)
 {
     uint16_t const server_port = 8080;
     int const server_queue_size = 4096;
