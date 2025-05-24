@@ -26,7 +26,7 @@
 
 // constants
 #define RECV_BUFFER_CAP 8192
-#define SEND_BUFFER_CAP 8192
+#define SEND_HEADER_CAP 2048
 #define THREAD_COUNT 16
 
 // structs
@@ -328,11 +328,10 @@ handle_connection(
 
         /* send */
         // send header
-        char send_buf[SEND_BUFFER_CAP] = {0};
-        size_t send_buf_offset = 0;
         file_size = file_get_size(url);
-        send_buf_offset = snprintf(
-                send_buf, SEND_BUFFER_CAP,
+        char send_buf[SEND_HEADER_CAP] = {0};
+        size_t send_buf_size = snprintf(
+                send_buf, SEND_HEADER_CAP,
                 "%s\r\n"
                 "Content-Type: %s\r\n"
                 "Content-Length: %ld\r\n"
@@ -340,8 +339,8 @@ handle_connection(
                 header_type,
                 mime_type_default(url),
                 file_size);
-        if(send_buf_offset > SEND_BUFFER_CAP) {die("failed to write header");}
-        socket_send_all(data->client, send_buf, send_buf_offset);
+        if(send_buf_size > SEND_HEADER_CAP) {die("failed to write header");}
+        socket_send_all(data->client, send_buf, send_buf_size);
 
         // send file
         if(sendfile(data->client, fd, NULL, file_size) < 0)
