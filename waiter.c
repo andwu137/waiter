@@ -66,7 +66,7 @@ char _http_default_500[] =
 // globals
 char _curr_dir[PATH_MAX] = {0};
 int _server_fd = 0;
-SSL_CTX *_ctx = NULL;
+SSL_CTX *_ssl_ctx = NULL;
 char _file_index[] = "index.html";
 char _file_error_404[] = "404.html";
 char *_mime_types[][2] = {
@@ -100,7 +100,8 @@ mime_type(
 }
 
 char const *
-mime_type_default(char const *restrict filename)
+mime_type_default(
+        char const *restrict filename)
 {
     char const *mime = mime_type(filename);
     return(mime == NULL ? _mime_types[0][1] : mime);
@@ -133,9 +134,10 @@ close_server(
 }
 
 void
-close_SSL_context(void)
+close_SSL_context(
+        void)
 {
-    SSL_CTX_free(_ctx);
+    SSL_CTX_free(_ssl_ctx);
 }
 
 size_t
@@ -165,19 +167,22 @@ file_is_reg(
 }
 
 void
-send_default_404_msg(SSL* ssl)
+send_default_404_msg(
+        SSL* ssl)
 {
     log("missing 404 file\n");
     socket_send_all(ssl, _http_default_404, sizeof(_http_default_404));
 }
 
 void
-send_request_denied(SSL* ssl)
+send_request_denied(
+        SSL* ssl)
 {
     socket_send_all(ssl, _http_default_417, sizeof(_http_default_417));
 }
 
-void send_internal_error(SSL* ssl)
+void send_internal_error(
+        SSL* ssl)
 {
     socket_send_all(ssl, _http_default_500, sizeof(_http_default_500));
 }
@@ -215,7 +220,7 @@ handle_connection(
 
         // init SSL connection
         SSL *ssl;
-        if((ssl = SSL_new(_ctx)) == NULL)
+        if((ssl = SSL_new(_ssl_ctx)) == NULL)
         {
             log("failed to create SSL connection struct");
             goto EXIT_REQUEST_CLOSE;
@@ -296,8 +301,6 @@ handle_connection(
         // strip leading slash
         url_size--;
         url++;
-
-        log("pre-vert: %s\n", url);
 
         /* url verification */
         char temp_filename[PATH_MAX] = {0};
@@ -464,19 +467,19 @@ main(
     atexit(close_server);
 
     // create and configure SSL context
-    if ((_ctx = SSL_CTX_new(TLS_server_method())) == NULL)
+    if ((_ssl_ctx = SSL_CTX_new(TLS_server_method())) == NULL)
     {
         die("failed to create SSL context");
     }
-    if (!SSL_CTX_use_certificate_chain_file(_ctx, CERT_FILE))
+    if (!SSL_CTX_use_certificate_chain_file(_ssl_ctx, CERT_FILE))
     {
         die("failed to link certification to SSL context");
     }
-    if (!SSL_CTX_use_PrivateKey_file(_ctx, PRIVATE_KEY_FILE, SSL_FILETYPE_PEM))
+    if (!SSL_CTX_use_PrivateKey_file(_ssl_ctx, PRIVATE_KEY_FILE, SSL_FILETYPE_PEM))
     {
         die("failed to link private key to SSL context");
     }
-    if (!SSL_CTX_check_private_key(_ctx))
+    if (!SSL_CTX_check_private_key(_ssl_ctx))
     {
         die("private key validity check failed");
     }
