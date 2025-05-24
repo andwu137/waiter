@@ -7,6 +7,8 @@
 #include <fcntl.h>
 #include <glob.h>
 #include <linux/limits.h>
+#include <pthread.h>
+#include <semaphore.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/sendfile.h>
@@ -30,8 +32,38 @@
 #define SEND_BUFFER_CAP 8192
 #define CERT_FILE "../certs/cert.pem" // NOTE(nick): path to certs & key go here
 #define PRIVATE_KEY_FILE "../certs/key.pem"
+#define SEND_HEADER_CAP 2048
+#define THREAD_COUNT 16
+
+// structs
+struct thread_data
+{
+    int client;
+    sem_t notify;
+};
+
+// constant globals
+char _http_default_404[] =
+    "HTTP/1.1 404 NOT FOUND\r\n"
+    "Content-Type: text/plain\r\n"
+    "Content-Length: 18\r\n" // WARN: relies on the string length below
+    "\r\n"
+    "404 page not found";
+char _http_default_417[] =
+    "HTTP/1.1 417 Expectation Failed\r\n"
+    "Content-Type: text/plain\r\n"
+    "Content-Length: 29\r\n" // WARN: relies on the string length below
+    "\r\n"
+    "unable to read entire request";
+char _http_default_500[] =
+    "HTTP/1.1 500 Internal Error\r\n"
+    "Content-Type: text/plain\r\n"
+    "Content-Length: 27\r\n" // WARN: relies on the string length below
+    "\r\n"
+    "500 - internal server error";
 
 // globals
+char _curr_dir[PATH_MAX] = {0};
 int _server_fd = 0;
 SSL_CTX *_ctx = NULL;
 char _file_index[] = "index.html";
@@ -44,10 +76,12 @@ char *_mime_types[][2] = {
 char *_blacklisted_config[] = {
     ".git/",
 };
+glob_t _blacklisted = {0};
 
 // functions
 char const *
-mime_type(char const *restrict filename)
+mime_type(
+        char const *restrict filename)
 {
     char *ext = strrchr(filename, '.');
     if(ext == NULL) {return(NULL);}
@@ -90,7 +124,8 @@ socket_send_all_SSL(
 }
 
 void
-close_server(void)
+close_server(
+        void)
 {
     log("close server");
     close(_server_fd);
@@ -103,7 +138,8 @@ close_SSL_context(void)
 }
 
 size_t
-file_get_size(char const *restrict filename)
+file_get_size(
+        char const *restrict filename)
 {
     struct stat sb;
     if(stat(filename, &sb) == -1)
@@ -114,7 +150,8 @@ file_get_size(char const *restrict filename)
 }
 
 uint8_t
-file_is_reg(char *filename)
+file_is_reg(
+        char const *restrict filename)
 {
     struct stat sb;
 
@@ -130,25 +167,17 @@ void
 send_default_404_msg_SSL(SSL* ssl)
 {
     log("missing 404 file\n");
-    char buffer[] =
-        "HTTP/1.1 404 NOT FOUND\r\n"
-        "Content-Type: text/plain\r\n"
-        "Content-Length: 18\r\n" // WARN: relies on the string length below
-        "\r\n"
-        "404 page not found";
-    socket_send_all_SSL(ssl, buffer, sizeof(buffer) - 1);
+    socket_send_all_SSL(ssl, _http_default_404, sizeof(_http_default_404));
 }
 
 void
 send_request_denied_SSL(SSL* ssl)
 {
-    char *request_denied =
-        "HTTP/1.1 417 Expectation Failed\r\n"
-        "Content-Type: text/plain\r\n"
-        "Content-Length: 29\r\n" // WARN: relies on the string length below
-        "\r\n"
-        "unable to read entire request";
-    socket_send_all_SSL(ssl, request_denied, strlen(request_denied));
+    socket_send_all_SSL(ssl, _http_default_417, sizeof(_http_default_417));
+}
+
+void send_internal_error_SSL(SSL* ssl) {
+    socket_send_all_SSL(ssl, _http_default_500, sizeof(_http_default_500));
 }
 
 uint8_t
@@ -165,130 +194,44 @@ user_handle_url_SSL(
 
     if(strcmp(url, "config") == 0 && 0)
     {
-        char buffer[] =
+        char *buffer =
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: text/html\r\n"
                 "Content-Length: 28\r\n" // WARN: relies on the string length below
                 "\r\n"
                 "<html><body>hi</body></html>";
-        socket_send_all_SSL(ssl, buffer, sizeof(buffer) - 1);
+        socket_send_all_SSL(ssl, buffer, strlen(buffer) - 1);
         return(1);
     }
     return(0);
 }
 
-int
-main(void)
+// NOTE(nick): we aren't error checking calls to close(); should we be?
+void *
+handle_connection(
+        void *data_ptr)
 {
-    uint16_t const server_port = 4433;
-    int const server_queue_size = 10;
-    struct sockaddr_in server_addr = {0};
-
-    // get socket
-    if((_server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
-    {
-        diep("failed to create server socket");
-    }
-
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(server_port);
-
-    int sockopt_enable = 1;
-    if (setsockopt(_server_fd,
-                SOL_SOCKET,
-                SO_REUSEADDR,
-                &sockopt_enable,
-                sizeof(int)) < 0)
-    {
-        diep("failed to setsockopt REUSEADDR");
-    }
-
-    // port
-    if(bind(_server_fd,
-                (struct sockaddr *)&server_addr,
-                sizeof(server_addr)) < 0)
-    {
-        diep("failed to bind server socket to port");
-    }
-
-    if(listen(_server_fd, server_queue_size) < 0)
-    {
-        diep("failed to listen to server socket");
-    }
-    log("Server listening on port\n");
-
-    // make sure to close the server
-    atexit(close_server);
-
-    // create and configure SSL context
-    if ((_ctx = SSL_CTX_new(TLS_server_method())) == NULL) {
-        diep("failed to create SSL context");
-    }
-    if (!SSL_CTX_use_certificate_chain_file(_ctx, CERT_FILE)) {
-        char errbuf[1024] = {0};
-        ERR_error_string(ERR_get_error(), errbuf);
-        log("certlink failed: %s\n", errbuf);
-        diep("failed to link certification to SSL context");
-    }
-    if (!SSL_CTX_use_PrivateKey_file(_ctx, PRIVATE_KEY_FILE, SSL_FILETYPE_PEM)) {
-        diep("failed to link private key to SSL context");
-    }
-    if (!SSL_CTX_check_private_key(_ctx)) {
-        diep("private key validity check failed");
-    }
-
-    atexit(close_SSL_context);
-
-    // we only serve from the public directory
-    chdir("public/");
-    char curr_dir[PATH_MAX] = {0};
-    if(getcwd(curr_dir, PATH_MAX) == NULL)
-    {
-        diep("failed to get current directory");
-    }
-
-    // setup blacklist paths
-    glob_t blacklisted = {0};
-    for(size_t i = 0;
-            i < static_array_size(_blacklisted_config);
-            i++)
-    {
-        int flags = GLOB_MARK | GLOB_NOSORT;
-        if(i != 0) {flags |= GLOB_APPEND;}
-        glob(_blacklisted_config[i], flags, NULL, &blacklisted);
-    }
-
-    // accept loop
+    struct thread_data *data = data_ptr;
     while(1)
     {
-        char recv_buf[RECV_BUFFER_CAP] = {0};
-        struct sockaddr_in client_addr = {0};
-        socklen_t client_addr_size = sizeof(client_addr);
-        int client_fd = 0;
+        sem_wait(&data->notify);
 
-        // get
-        if((client_fd = accept(_server_fd,
-                        (struct sockaddr *)&client_addr,
-                        &client_addr_size)) < 0)
-        {
-            logp("failed to accept a connection\n");
-            continue;
-        }
-
-        // establish SSL connection
-        // TODO(nick): Error handling here; this is probably recoverable.
-        SSL *ssl = NULL;
+        // init SSL connection
+        SSL *ssl;
         if((ssl = SSL_new(_ctx)) == NULL) {
-            die("failed to create SSL connection struct");
+            log("failed to create SSL connection struct");
+            goto EXIT_REQUEST;
         }
-        if (SSL_set_fd(ssl, client_fd) != 1) {
-            die("failed to link client fd to SSL connection struct");
+        if (SSL_set_fd(ssl, data->client) != 1) {
+            log("failed to link client fd to SSL connection struct");
+            goto EXIT_REQUEST;
         }
         if (SSL_accept(ssl) <= 0) {
-            die("SSL connection rejected due bad client / internal error");
+            log("SSL connection rejected due bad client / internal error");
+            goto EXIT_REQUEST;
         }
 
+        char recv_buf[RECV_BUFFER_CAP] = {0};
         ssize_t recv_buf_size = 0;
         recv_buf_size = SSL_read(ssl, recv_buf, RECV_BUFFER_CAP); // TODO: unfinished reads
         if(recv_buf_size == 0) {goto EXIT_REQUEST;}
@@ -376,10 +319,10 @@ main(void)
             // blacklisted prefixes
             uint8_t valid = 1;
             for(size_t i = 0;
-                    i < blacklisted.gl_pathc;
+                    i < _blacklisted.gl_pathc;
                     i++)
             {
-                if(strstr(url, blacklisted.gl_pathv[i]) == url)
+                if(strstr(url, _blacklisted.gl_pathv[i]) == url)
                 {
                     url = _file_error_404;
                     valid = 0;
@@ -390,7 +333,7 @@ main(void)
             if(valid)
             {
                 realpath(url, temp_filename);
-                if(memcmp(curr_dir, temp_filename, strlen(curr_dir)) != 0)
+                if(memcmp(_curr_dir, temp_filename, strlen(_curr_dir)) != 0)
                 {
                     url = _file_error_404;
                 }
@@ -423,11 +366,10 @@ main(void)
 
         /* send */
         // send header
-        char send_buf[SEND_BUFFER_CAP] = {0};
-        size_t send_buf_offset = 0;
         file_size = file_get_size(url);
-        send_buf_offset = snprintf(
-                send_buf, SEND_BUFFER_CAP,
+        char send_buf[SEND_HEADER_CAP] = {0};
+        size_t send_buf_size = snprintf(
+                send_buf, SEND_HEADER_CAP,
                 "%s\r\n"
                 "Content-Type: %s\r\n"
                 "Content-Length: %ld\r\n"
@@ -435,13 +377,21 @@ main(void)
                 header_type,
                 mime_type_default(url),
                 file_size);
-        if(send_buf_offset > SEND_BUFFER_CAP) {die("failed to write header");}
-        socket_send_all_SSL(ssl, send_buf, send_buf_offset);
+        if(send_buf_size > SEND_HEADER_CAP) {
+            log("failed to write header");
+            send_internal_error_SSL(ssl);
+            goto EXIT_REQUEST;
+        }
+        socket_send_all_SSL(ssl, send_buf, send_buf_size);
 
-        // TODO(nick): fail the file transfer & recover.
+        // send file
         char *file_map = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
         if(file_map == MAP_FAILED) {
-            diep("file mmap failed");
+            // BUG(nick): hopefully the header we sent describes a text format.
+            logp("failed to mmap file");
+            char msg[] = "500 - Internal Server Error\nFailed to send file";
+            socket_send_all_SSL(ssl, msg, strlen(msg));
+            goto EXIT_REQUEST;
         }
         close(fd);
         socket_send_all_SSL(ssl, file_map, file_size);
@@ -450,12 +400,153 @@ main(void)
         }
 
 EXIT_REQUEST:
-        close(client_fd);
-        SSL_shutdown(ssl); // NOTE(nick): don't call if SSL has thrown SSL_ERROR_SYSCALL or SSL_ERROR_SSL.
-        SSL_free(ssl);
+        // end ssl connection
+        if (ssl != NULL) {
+            unsigned long err = ERR_get_error();
+            if (err != SSL_ERROR_SYSCALL && err != SSL_ERROR_SSL) {
+                SSL_shutdown(ssl);
+            }
+
+            SSL_free(ssl);
+        }
+
+        close(data->client);
+        data->client = -1;
     }
 
-    globfree(&blacklisted);
+    return(NULL);
+}
+
+int
+main(
+        void)
+{
+    uint16_t const server_port = 8080;
+    int const server_queue_size = 4096;
+    struct sockaddr_in server_addr = {0};
+
+    // get socket
+    if((_server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+    {
+        diep("failed to create server socket");
+    }
+
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(server_port);
+
+    int sockopt_enable = 1;
+    if (setsockopt(_server_fd,
+                SOL_SOCKET,
+                SO_REUSEADDR,
+                &sockopt_enable,
+                sizeof(int)) < 0)
+    {
+        diep("failed to setsockopt REUSEADDR");
+    }
+
+    // port
+    if(bind(_server_fd,
+                (struct sockaddr *)&server_addr,
+                sizeof(server_addr)) < 0)
+    {
+        diep("failed to bind server socket to port");
+    }
+
+    if(listen(_server_fd, server_queue_size) < 0)
+    {
+        diep("failed to listen to server socket");
+    }
+    log("Server listening on port %d\n", server_port);
+
+    // make sure to close the server
+    atexit(close_server);
+
+    // create and configure SSL context
+    if ((_ctx = SSL_CTX_new(TLS_server_method())) == NULL) {
+        diep("failed to create SSL context");
+    }
+    if (!SSL_CTX_use_certificate_chain_file(_ctx, CERT_FILE)) {
+        char errbuf[1024] = {0};
+        ERR_error_string(ERR_get_error(), errbuf);
+        log("certlink failed: %s\n", errbuf);
+        diep("failed to link certification to SSL context");
+    }
+    if (!SSL_CTX_use_PrivateKey_file(_ctx, PRIVATE_KEY_FILE, SSL_FILETYPE_PEM)) {
+        diep("failed to link private key to SSL context");
+    }
+    if (!SSL_CTX_check_private_key(_ctx)) {
+        diep("private key validity check failed");
+    }
+
+    atexit(close_SSL_context);
+
+    // we only serve from the public directory
+    chdir("public/");
+    if(getcwd(_curr_dir, PATH_MAX) == NULL)
+    {
+        diep("failed to get current directory");
+    }
+
+    // setup blacklist paths
+    for(size_t i = 0;
+            i < static_array_size(_blacklisted_config);
+            i++)
+    {
+        int flags = GLOB_MARK | GLOB_NOSORT;
+        if(i != 0) {flags |= GLOB_APPEND;}
+        glob(_blacklisted_config[i], flags, NULL, &_blacklisted);
+    }
+
+    // spawn threads
+    pthread_t thread_ids[THREAD_COUNT] = {0};
+    struct thread_data thread_data_arr[THREAD_COUNT] = {0};
+    for(size_t i = 0; i < THREAD_COUNT; i++)
+    {
+        thread_data_arr[i].client = -1;
+        if(sem_init(&thread_data_arr[i].notify, 0, 0) != 0)
+        {
+            die("failed to init notify semaphore");
+        }
+
+        if(pthread_create(
+                &thread_ids[i],
+                NULL,
+                handle_connection,
+                &thread_data_arr[i]
+                ) != 0)
+        {
+            diep("failed to spawn thread");
+        }
+    }
+
+    // accept loop
+    size_t thread_to_add_to = 0;
+    while(1)
+    {
+        struct sockaddr_in client_addr = {0};
+        socklen_t client_addr_size = sizeof(client_addr);
+        int client_fd = 0;
+
+        // get
+        if((client_fd = accept(_server_fd,
+                        (struct sockaddr *)&client_addr,
+                        &client_addr_size)) < 0)
+        {
+            logp("failed to accept a connection\n");
+            continue;
+        }
+
+        // add to thread client
+        while(thread_data_arr[thread_to_add_to].client != -1)
+        {
+            thread_to_add_to = (thread_to_add_to + 1) % THREAD_COUNT;
+        }
+        thread_data_arr[thread_to_add_to].client = client_fd;
+        sem_post(&thread_data_arr[thread_to_add_to].notify);
+    }
+
+    globfree(&_blacklisted);
 
     return(0);
 }
