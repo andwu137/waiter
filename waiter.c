@@ -23,8 +23,8 @@
 
 #define log(...) fprintf(stderr, PROGRAM_NAME": "__VA_ARGS__)
 #define logp(msg) perror(PROGRAM_NAME": "msg)
-#define die(...) {log("ERROR: "__VA_ARGS__); putc('\n', stderr); exit(-1);}
-#define diep(msg) {logp("ERROR: "msg); exit(-1);}
+#define die(...) {sem_wait(&_die_lock); log("ERROR: "__VA_ARGS__); putc('\n', stderr); exit(-1);}
+#define diep(msg) {sem_wait(&_die_lock); logp("ERROR: "msg); exit(-1);}
 #define static_array_size(arr) sizeof(arr) / sizeof(*(arr))
 
 // constants
@@ -64,6 +64,7 @@ char _http_default_500[] =
     "500 - internal server error";
 
 // globals
+sem_t _die_lock = {0};
 char _curr_dir[PATH_MAX] = {0};
 int _server_fd = 0;
 SSL_CTX *_ssl_ctx = NULL;
@@ -428,6 +429,9 @@ main(
     uint16_t const server_port = 8080;
     int const server_queue_size = 4096;
     struct sockaddr_in server_addr = {0};
+
+    // die lock
+    sem_init(&_die_lock, 0, 1);
 
     // get socket
     if((_server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
