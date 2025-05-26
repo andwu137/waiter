@@ -33,8 +33,8 @@
 #define THREAD_COUNT 16
 
 // certs
-#define CERT_FILE "../certs/cert.pem"
-#define PRIVATE_KEY_FILE "../certs/key.pem"
+#define FILE_CERT "certs/cert.pem"
+#define FILE_CERT_PRIVATE_KEY "certs/key.pem"
 
 // structs
 struct thread_data
@@ -223,17 +223,17 @@ handle_connection(
         SSL *ssl;
         if((ssl = SSL_new(_ssl_ctx)) == NULL)
         {
-            log("failed to create SSL connection struct");
+            log("failed to create SSL connection struct\n");
             goto EXIT_REQUEST_CLOSE;
         }
         if (SSL_set_fd(ssl, data->client) != 1)
         {
-            log("failed to link client fd to SSL connection struct");
+            log("failed to link client fd to SSL connection struct\n");
             goto EXIT_REQUEST;
         }
         if (SSL_accept(ssl) <= 0)
         {
-            log("SSL connection rejected due bad client / internal error");
+            log("SSL connection rejected due bad client / internal error\n");
             goto EXIT_REQUEST;
         }
 
@@ -385,7 +385,7 @@ handle_connection(
                 file_size);
         if(send_buf_size > SEND_HEADER_CAP)
         {
-            log("failed to write header");
+            log("failed to write header\n");
             goto EXIT_REQUEST;
         }
         socket_send_all(ssl, send_buf, send_buf_size);
@@ -473,21 +473,20 @@ main(
     // create and configure SSL context
     if ((_ssl_ctx = SSL_CTX_new(TLS_server_method())) == NULL)
     {
-        die("failed to create SSL context");
+        die("failed to create SSL context\n");
     }
-    if (!SSL_CTX_use_certificate_chain_file(_ssl_ctx, CERT_FILE))
+    if (!SSL_CTX_use_certificate_chain_file(_ssl_ctx, FILE_CERT))
     {
-        die("failed to link certification to SSL context");
+        die("failed to link certification to SSL context\n");
     }
-    if (!SSL_CTX_use_PrivateKey_file(_ssl_ctx, PRIVATE_KEY_FILE, SSL_FILETYPE_PEM))
+    if (!SSL_CTX_use_PrivateKey_file(_ssl_ctx, FILE_CERT_PRIVATE_KEY, SSL_FILETYPE_PEM))
     {
-        die("failed to link private key to SSL context");
+        die("failed to link private key to SSL context\n");
     }
     if (!SSL_CTX_check_private_key(_ssl_ctx))
     {
-        die("private key validity check failed");
+        die("private key validity check failed\n");
     }
-
     atexit(close_SSL_context);
 
     // we only serve from the public directory
@@ -515,7 +514,7 @@ main(
         thread_data_arr[i].client = -1;
         if(sem_init(&thread_data_arr[i].notify, 0, 0) != 0)
         {
-            die("failed to init notify semaphore");
+            diep("failed to init notify semaphore");
         }
 
         if(pthread_create(
