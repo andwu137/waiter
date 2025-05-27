@@ -35,6 +35,7 @@
 #define RECV_BUFFER_CAP 8192
 #define SEND_HEADER_CAP 2048
 #define THREAD_COUNT 16
+#define HTTP_HEADER_CACHE "Cache-control: max-age=86400, public\r\n"
 
 // certs
 #define FILE_CERT "certs/cert.pem"
@@ -377,6 +378,7 @@ handle_connection(
                 "%s\r\n"
                 "Content-Type: %s\r\n"
                 "Content-Length: %ld\r\n"
+                HTTP_HEADER_CACHE // NOTE: this will cache the 404 as well
                 "\r\n",
                 header_type,
                 mime_type_default(url),
