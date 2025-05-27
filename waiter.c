@@ -108,7 +108,7 @@ mime_type_default(
     return(mime == NULL ? _mime_types[0][1] : mime);
 }
 
-void
+uint8_t
 socket_send_all(
         SSL* ssl,
         char const *restrict buf,
@@ -120,10 +120,11 @@ socket_send_all(
         ssize_t bsent = 0;
         if((bsent = SSL_write(ssl, buf + bytes_sent, buf_size - bytes_sent)) <= 0)
         {
-            diep("failed to send packet");
+            return(0);
         }
         bytes_sent += bsent;
     } while(bytes_sent < buf_size);
+    return(1);
 }
 
 void
@@ -181,8 +182,7 @@ user_handle_url(
                 "Content-Length: 28\r\n" // WARN: relies on the string length below
                 "\r\n"
                 "<html><body>hi</body></html>";
-        socket_send_all(ssl, buffer, strlen(buffer));
-        return(1);
+        return(socket_send_all(ssl, buffer, strlen(buffer)));
     }
     return(0);
 }
@@ -199,13 +199,13 @@ handle_connection(
         sem_wait(&data->notify);
 
         // init SSL connection
-        SSL *ssl;
+        SSL *ssl = 0;
         if((ssl = SSL_new(_ssl_ctx)) == NULL)
         {
             log("failed to create SSL connection struct\n");
             goto EXIT_REQUEST_CLOSE;
         }
-        if (SSL_set_fd(ssl, data->client) != 1)
+        if (!SSL_set_fd(ssl, data->client))
         {
             log("failed to link client fd to SSL connection struct\n");
             goto EXIT_REQUEST;
@@ -388,7 +388,10 @@ handle_connection(
             log("failed to write header\n");
             goto EXIT_REQUEST;
         }
-        socket_send_all(ssl, send_buf, send_buf_size);
+        if(!socket_send_all(ssl, send_buf, send_buf_size))
+        {
+            goto EXIT_REQUEST;
+        }
 
         // send file
         char *file_map = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
@@ -398,7 +401,7 @@ handle_connection(
             goto EXIT_REQUEST;
         }
         if(close(fd) < 0) {die("failed to close file fd");}
-        socket_send_all(ssl, file_map, file_size);
+        socket_send_all(ssl, file_map, file_size); // WARN: ignore error, since we are at the end
         if(munmap(file_map, file_size))
         {
             die("file munmap failed");
