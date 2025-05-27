@@ -9,6 +9,7 @@
 #include <linux/limits.h>
 #include <pthread.h>
 #include <semaphore.h>
+#include <signal.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/sendfile.h>
@@ -429,6 +430,16 @@ main(
 
     // die lock
     sem_init(&_die_lock, 0, 1);
+
+    // ignore SIGPIPE
+    struct sigaction act = {0};
+    memset(&act, 0, sizeof(act));
+    act.sa_flags = SA_RESTART;
+    act.sa_handler = SIG_IGN;
+    if(sigaction(SIGPIPE, &act, NULL) == -1)
+    {
+        diep("sigaction failed to bind SIGPIPE");
+    }
 
     // get socket
     if((_server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
