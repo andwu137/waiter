@@ -19,6 +19,8 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
+#include "waiter_mime.c"
+
 #define PROGRAM_NAME "waiter"
 
 #define log(...) fprintf(stderr, PROGRAM_NAME": "__VA_ARGS__)
@@ -26,6 +28,7 @@
 #define die(...) {sem_wait(&_die_lock); log("ERROR: "__VA_ARGS__); putc('\n', stderr); exit(-1);}
 #define diep(msg) {sem_wait(&_die_lock); logp("ERROR: "msg); exit(-1);}
 #define static_array_size(arr) sizeof(arr) / sizeof(*(arr))
+#define socket_send_static_array(ssl, arr) (socket_send_all(ssl, arr, sizeof(arr)))
 
 // constants
 #define RECV_BUFFER_CAP 8192
@@ -70,11 +73,6 @@ int _server_fd = 0;
 SSL_CTX *_ssl_ctx = NULL;
 char _file_index[] = "index.html";
 char _file_error_404[] = "404.html";
-char *_mime_types[][2] = {
-    {"html", "text/html"},
-    {"js", "text/javascript"},
-    {"css", "text/css"},
-};
 char *_blacklisted_config[] = {
     ".git/",
 };
@@ -167,27 +165,6 @@ file_is_reg(
     return (sb.st_mode & S_IFMT) == S_IFREG;
 }
 
-void
-send_default_404_msg(
-        SSL* ssl)
-{
-    log("missing 404 file\n");
-    socket_send_all(ssl, _http_default_404, sizeof(_http_default_404));
-}
-
-void
-send_request_denied(
-        SSL* ssl)
-{
-    socket_send_all(ssl, _http_default_417, sizeof(_http_default_417));
-}
-
-void send_internal_error(
-        SSL* ssl)
-{
-    socket_send_all(ssl, _http_default_500, sizeof(_http_default_500));
-}
-
 uint8_t
 user_handle_url(
         SSL* ssl,
@@ -248,7 +225,7 @@ handle_connection(
                 recv_buf_size = SSL_read(ssl, recv_buf, RECV_BUFFER_CAP);
                 if(recv_buf_size == 0) {goto EXIT_REQUEST;}
             } while(recv_buf_size == RECV_BUFFER_CAP);
-            send_request_denied(ssl);
+            socket_send_static_array(ssl, _http_default_417);
             goto EXIT_REQUEST;
         }
         if(recv_buf_size < 0) {diep("recv");}
@@ -265,7 +242,11 @@ handle_connection(
         {
             if(*url == ' ') {*(url++) = '\0'; break;}
         }
-        if(url == recv_buf_end) {send_request_denied(ssl); goto EXIT_REQUEST;}
+        if(url == recv_buf_end)
+        {
+            socket_send_static_array(ssl, _http_default_417);
+            goto EXIT_REQUEST;
+        }
 
         params = url;
         for(protocol = url; protocol < recv_buf_end; protocol++)
@@ -273,13 +254,21 @@ handle_connection(
             if(*protocol == '?') {*(protocol++) = '\0'; params = protocol;}
             if(*protocol == ' ') {*(protocol++) = '\0'; break;}
         }
-        if(params == recv_buf_end) {send_request_denied(ssl); goto EXIT_REQUEST;}
+        if(params == recv_buf_end)
+        {
+            socket_send_static_array(ssl, _http_default_417);
+            goto EXIT_REQUEST;
+        }
 
         for(rest = protocol; rest < recv_buf_end; rest++)
         {
             if(isspace(*rest)) {*(rest++) = '\0'; break;}
         }
-        if(rest == recv_buf_end) {send_request_denied(ssl); goto EXIT_REQUEST;}
+        if(rest == recv_buf_end)
+        {
+            socket_send_static_array(ssl, _http_default_417);
+            goto EXIT_REQUEST;
+        }
 
         // verify request parameters
         if(strcmp(method, "GET") != 0) {log("failed: was not GET\n"); goto EXIT_REQUEST;}
@@ -360,11 +349,19 @@ handle_connection(
         // check 404
         if(fd < 0)
         {
-            if(url == _file_error_404) {send_default_404_msg(ssl); goto EXIT_REQUEST;}
+            if(url == _file_error_404)
+            {
+                socket_send_static_array(ssl, _http_default_404);
+                goto EXIT_REQUEST;
+            }
 
             url = _file_error_404;
             fd = open(url, O_RDONLY);
-            if(fd < 0) {send_default_404_msg(ssl); goto EXIT_REQUEST;}
+            if(fd < 0)
+            {
+                socket_send_static_array(ssl, _http_default_404);
+                goto EXIT_REQUEST;
+            }
 
             file_size = file_get_size(url);
             header_type = "HTTP/1.1 404 NOT FOUND";
