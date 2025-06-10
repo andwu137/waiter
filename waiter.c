@@ -34,7 +34,6 @@
 // constants
 #define RECV_BUFFER_CAP 8192
 #define SEND_HEADER_CAP 2048
-#define THREAD_COUNT 16
 #if defined(DEBUG)
 #   define HTTP_HEADER_CACHE "Clear-Site-Data: \"*\"\r\n"
 #else
@@ -436,9 +435,10 @@ int
 main(
         void)
 {
-    uint16_t const server_port = 8080;
-    int const server_queue_size = 4096;
+    uint16_t server_port = 8080;
+    int server_queue_size = 4096;
     struct sockaddr_in server_addr = {0};
+    size_t thread_count = 16;
 
     // die lock
     sem_init(&_die_lock, 0, 1);
@@ -527,9 +527,12 @@ main(
     }
 
     // spawn threads
-    pthread_t thread_ids[THREAD_COUNT] = {0};
-    struct thread_data thread_data_arr[THREAD_COUNT] = {0};
-    for(size_t i = 0; i < THREAD_COUNT; i++)
+    void *thread_alloc_block = calloc(
+            thread_count * 2,
+            sizeof(pthread_t) + sizeof(struct thread_data));
+    pthread_t *thread_ids = thread_alloc_block;
+    struct thread_data *thread_data_arr = (struct thread_data *)(thread_ids + thread_count);
+    for(size_t i = 0; i < thread_count; i++)
     {
         thread_data_arr[i].client = -1;
         if(sem_init(&thread_data_arr[i].notify, 0, 0) != 0)
@@ -538,10 +541,10 @@ main(
         }
 
         if(pthread_create(
-                &thread_ids[i],
-                NULL,
-                handle_connection,
-                &thread_data_arr[i]
+                    &thread_ids[i],
+                    NULL,
+                    handle_connection,
+                    &thread_data_arr[i]
                 ) != 0)
         {
             diep("failed to spawn thread");
@@ -568,7 +571,7 @@ main(
         // add to thread client
         while(thread_data_arr[thread_to_add_to].client != -1)
         {
-            thread_to_add_to = (thread_to_add_to + 1) % THREAD_COUNT;
+            thread_to_add_to = (thread_to_add_to + 1) % thread_count;
         }
         thread_data_arr[thread_to_add_to].client = client_fd;
         sem_post(&thread_data_arr[thread_to_add_to].notify);
