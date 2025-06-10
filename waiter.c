@@ -234,7 +234,7 @@ handle_connection(
             socket_send_static_array(ssl, _http_default_417);
             goto EXIT_REQUEST;
         }
-        if(recv_buf_size < 0) {diep("recv");}
+        if(recv_buf_size < 0) {goto EXIT_REQUEST;}
         char *recv_buf_end = recv_buf + recv_buf_size;
 
         // recv parse
