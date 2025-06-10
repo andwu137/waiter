@@ -433,7 +433,8 @@ EXIT_REQUEST_CLOSE:
 
 int
 main(
-        void)
+        int argc,
+        char **argv)
 {
     uint16_t server_port = 8080;
     int server_queue_size = 4096;
@@ -442,6 +443,20 @@ main(
 
     // die lock
     sem_init(&_die_lock, 0, 1);
+
+    // args
+    for (char **arg = argv; *arg != NULL; arg++)
+    {
+        if(strncmp(*arg, "-p", sizeof("-p") - 1) == 0)
+        {
+            server_port = atoi((*arg) + sizeof("-p") - 1);
+        }
+        else if(strncmp(*arg, "-t", sizeof("-t") - 1) == 0)
+        {
+            thread_count = atoi((*arg) + sizeof("-t") - 1);
+        }
+    }
+    printf("%d %ld\n", server_port, thread_count);
 
     // ignore SIGPIPE
     struct sigaction act = {0};
