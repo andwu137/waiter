@@ -4,5 +4,10 @@ ifneq ($(STATIC),)
 	FLAGS += -static
 endif
 
-all:
-	$(CC) $(FLAGS) -O2 waiter.c -lssl -lcrypto -o waiter
+all: debug
+
+release:
+	$(CC) $(FLAGS) -O3 -march=native waiter.c -lssl -lcrypto -o waiter
+
+debug:
+	$(CC) $(FLAGS) -O0 -g -DDEBUG waiter.c -lssl -lcrypto -o waiter
