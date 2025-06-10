@@ -35,7 +35,11 @@
 #define RECV_BUFFER_CAP 8192
 #define SEND_HEADER_CAP 2048
 #define THREAD_COUNT 16
-#define HTTP_HEADER_CACHE "Cache-control: max-age=86400, public\r\n"
+#if defined(DEBUG)
+#   define HTTP_HEADER_CACHE "Clear-Site-Data: \"*\"\r\n"
+#else
+#   define HTTP_HEADER_CACHE "Cache-control: max-age=86400, public\r\n"
+#endif
 
 // certs
 #define FILE_CERT "certs/cert.pem"
