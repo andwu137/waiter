@@ -323,7 +323,10 @@ handle_connection(
                     i < _blacklisted.gl_pathc;
                     i++)
             {
-                if(strstr(url, _blacklisted.gl_pathv[i]) == url)
+                if(strncmp(url,
+                            _blacklisted.gl_pathv[i],
+                            strlen(_blacklisted.gl_pathv[i])
+                        ) == 0)
                 {
                     url = _file_error_404;
                     valid = 0;
