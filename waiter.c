@@ -72,6 +72,7 @@ char _http_default_500[] =
     "500 - internal server error";
 
 // globals
+uint8_t _is_server_running = 1;
 sem_t _die_lock = {0};
 char _curr_dir[PATH_MAX] = {0};
 int _server_fd = 0;
@@ -134,7 +135,7 @@ void
 close_server(
         void)
 {
-    log("close server");
+    log("closed server");
     close(_server_fd);
 }
 
@@ -168,7 +169,7 @@ file_is_reg(
         if(errno == ENOMEM) {diep("stat");}
         else {return(0);}
     }
-    return (sb.st_mode & S_IFMT) == S_IFREG;
+    return((sb.st_mode & S_IFMT) == S_IFREG);
 }
 
 uint8_t
@@ -196,10 +197,42 @@ handle_connection(
 {
     struct thread_data *data = data_ptr;
     unsigned long ssl_error = 0;
+    struct timespec ts = {0};
 
-    while(1)
+    while(_is_server_running)
     {
-        sem_wait(&data->notify);
+        do
+        {
+            if (clock_gettime(CLOCK_REALTIME, &ts) == -1)
+            {
+                diep("clock_gettime");
+            }
+
+            ts.tv_nsec += 100 * 1000000; // ms * (ns/ms)
+            if(ts.tv_nsec > 1000 * 1000000)
+            {
+                ts.tv_nsec = 0;
+                ts.tv_sec += 1;
+            }
+            if(sem_timedwait(&data->notify, &ts) == -1)
+            {
+                if(!_is_server_running)
+                {
+                    goto EXIT;
+                }
+                else if(errno != EINVAL
+                        && errno != ETIMEDOUT
+                        && errno != EAGAIN)
+                {
+                    _is_server_running = 0;
+                    die("failed to wait on sem\n");
+                }
+            }
+            else
+            {
+                break;
+            }
+        } while(1);
 
         // init SSL connection
         SSL *ssl = 0;
@@ -428,6 +461,40 @@ EXIT_REQUEST_CLOSE:
         data->client = -1;
     }
 
+EXIT:
+    return(NULL);
+}
+
+void *
+handle_console(
+        void *dataPtr)
+{
+    char *line;
+    size_t line_capacity;
+    size_t line_size;
+
+    while(_is_server_running)
+    {
+        fwrite("$ ", 1, 2, stdout);
+        fflush(stdout);
+
+        line_size = getline(&line, &line_capacity, stdin);
+        while(line_size > 0
+                && (line[line_size - 1] == '\n'
+                    || line[line_size - 1] == '\r'))
+        {
+            line_size--;
+        }
+
+        if(line_size == -1 || strncmp(line, "exit", line_size) == 0)
+        {
+            _is_server_running = 0;
+            goto EXIT;
+        }
+    }
+
+EXIT:
+    log("server is closing\n");
     return(NULL);
 }
 
@@ -440,6 +507,8 @@ main(
     int server_queue_size = 4096;
     struct sockaddr_in server_addr = {0};
     size_t thread_count = 16;
+
+    _is_server_running = 1;
 
     // die lock
     sem_init(&_die_lock, 0, 1);
@@ -469,7 +538,7 @@ main(
     }
 
     // get socket
-    if((_server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+    if((_server_fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0)) < 0)
     {
         diep("failed to create server socket");
     }
@@ -541,7 +610,7 @@ main(
         glob(_blacklisted_config[i], flags, NULL, &_blacklisted);
     }
 
-    // spawn threads
+    // spawn recv/send threads
     void *thread_alloc_block = calloc(
             thread_count * 2,
             sizeof(pthread_t) + sizeof(struct thread_data));
@@ -566,21 +635,39 @@ main(
         }
     }
 
+    // spawn console thread
+    pthread_t console_thread;
+    if(pthread_create(
+                &console_thread,
+                NULL,
+                handle_console,
+                NULL
+            ) != 0)
+    {
+        diep("failed to spawn thread");
+    }
+
     // accept loop
     size_t thread_to_add_to = 0;
-    while(1)
+    while(_is_server_running)
     {
         struct sockaddr_in client_addr = {0};
         socklen_t client_addr_size = sizeof(client_addr);
         int client_fd = 0;
 
         // get
-        if((client_fd = accept(_server_fd,
+        while((client_fd = accept(_server_fd,
                         (struct sockaddr *)&client_addr,
                         &client_addr_size)) < 0)
         {
-            logp("failed to accept a connection\n");
-            continue;
+            if(errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                if(!_is_server_running) {goto EXIT;}
+            }
+            else
+            {
+                logp("failed to accept a connection\n");
+            }
         }
 
         // add to thread client
@@ -590,6 +677,18 @@ main(
         }
         thread_data_arr[thread_to_add_to].client = client_fd;
         sem_post(&thread_data_arr[thread_to_add_to].notify);
+    }
+
+EXIT:
+    for(size_t i = 0; i < thread_count; i++)
+    {
+        void *pret;
+        pthread_join(thread_ids[i], &pret);
+    }
+
+    {
+        void *pret;
+        pthread_join(console_thread, &pret);
     }
 
     globfree(&_blacklisted);
