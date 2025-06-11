@@ -516,13 +516,20 @@ main(
     // args
     for (char **arg = argv; *arg != NULL; arg++)
     {
+        char *end_ptr;
         if(strncmp(*arg, "-p", sizeof("-p") - 1) == 0)
         {
-            server_port = atoi((*arg) + sizeof("-p") - 1);
+            char *arg_offset = (*arg) + sizeof("-p") - 1;
+            uint16_t temp = strtol(arg_offset, &end_ptr, 10);
+            if(end_ptr != arg_offset && errno != 0) {server_port = temp;}
+            else {log("failed to parse -p option");}
         }
         else if(strncmp(*arg, "-t", sizeof("-t") - 1) == 0)
         {
-            thread_count = atoi((*arg) + sizeof("-t") - 1);
+            char *arg_offset = (*arg) + sizeof("-t") - 1;
+            size_t temp = strtol(arg_offset, &end_ptr, 10);
+            if(end_ptr != arg_offset && errno != 0) {thread_count = temp;}
+            else {log("failed to parse -t option");}
         }
     }
     printf("%d %ld\n", server_port, thread_count);
