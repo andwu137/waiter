@@ -822,6 +822,11 @@ main(
 
     // accept loop
     size_t thread_to_add_to = 0;
+    struct pollfd poll_server = {
+        .fd = _server_fd,
+        .events = POLLIN,
+        .revents = 0,
+    };
     while(_is_server_running)
     {
         struct sockaddr_in client_addr = {0};
@@ -829,24 +834,41 @@ main(
         int client_fd = 0;
 
         // get
-        while((client_fd = accept(_server_fd,
-                        (struct sockaddr *)&client_addr,
-                        &client_addr_size)) < 0)
+        while(1)
         {
-            if(errno == EAGAIN || errno == EWOULDBLOCK)
+            if(poll(&poll_server, 1, 100) == -1) {die("failed to poll on server port");}
+            if(!_is_server_running) {goto EXIT;}
+
+            if((client_fd = accept(_server_fd,
+                            (struct sockaddr *)&client_addr,
+                            &client_addr_size)
+                        ) < 0)
             {
-                if(!_is_server_running) {goto EXIT;}
+                if(errno == EAGAIN || errno == EWOULDBLOCK) {continue;}
+                else {logp("failed to accept a connection\n");}
             }
             else
             {
-                logp("failed to accept a connection\n");
+                break;
             }
         }
 
         // add to thread client
-        while(thread_data_arr[thread_to_add_to].client != -1)
+        uint8_t found_thread = 0;
+        while(1)
         {
-            thread_to_add_to = (thread_to_add_to + 1) % thread_count;
+            for(size_t i = thread_to_add_to + 1;
+                    i != thread_to_add_to;
+                    i = (i + 1) % thread_count)
+            {
+                if(thread_data_arr[thread_to_add_to].client == -1)
+                {
+                    found_thread = 1;
+                    break;
+                }
+            }
+            if(found_thread) {break;}
+            usleep(1000);
         }
         thread_data_arr[thread_to_add_to].client = client_fd;
         sem_post(&thread_data_arr[thread_to_add_to].notify);
