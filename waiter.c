@@ -602,6 +602,7 @@ handle_console(
     size_t line_capacity;
     size_t line_size;
 
+    // TODO(andrew): raw mode
     while(_is_server_running)
     {
         fwrite("$ ", 1, 2, stdout);
@@ -620,6 +621,12 @@ handle_console(
             _is_server_running = 0;
             goto EXIT;
         }
+        else if(strncmp(line, "clear", line_size) == 0)
+        {
+            char *msg = "\033[2J\033[H";
+            printf("%s", msg);
+        }
+        // TODO(andrew): allow reloading of the file system
     }
 
 EXIT:
