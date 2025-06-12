@@ -4,9 +4,11 @@
 #include <stdlib.h>
 
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <glob.h>
 #include <linux/limits.h>
+#include <poll.h>
 #include <pthread.h>
 #include <semaphore.h>
 #include <signal.h>
@@ -51,6 +53,21 @@ struct thread_data
     sem_t notify;
 };
 
+struct hashtable_entry
+{
+    char *name;
+    char *filedata;
+    size_t name_size;
+    size_t filedata_size;
+    struct hashtable_entry *next;
+};
+
+struct hashtable
+{
+    struct hashtable_entry *table;
+    size_t size;
+};
+
 // constant globals
 char _http_default_404[] =
     "HTTP/1.1 404 NOT FOUND\r\n"
@@ -82,9 +99,200 @@ char _file_error_404[] = "404.html";
 char *_blacklisted_config[] = {
     ".git/",
 };
-glob_t _blacklisted = {0};
+struct hashtable _file_cache;
 
 // functions
+void
+hashtable_init(
+        struct hashtable *ht,
+        size_t size)
+{
+    ht->size = size;
+    ht->table = calloc(ht->size, sizeof(*ht->table));
+}
+
+uint32_t
+hash_sum32(
+        char *data,
+        size_t data_size)
+{
+    // PERF(andrew): simd hash
+    uint32_t hash = 0;
+    for(size_t i = 0; i < data_size; i++)
+    {
+        hash = (hash * 31) + (uint32_t)data[i];
+    }
+    return hash;
+}
+
+void
+hashtable_insert(
+        struct hashtable *ht,
+        struct hashtable_entry hte)
+{
+    uint32_t hashed = hash_sum32(hte.name, hte.name_size) % ht->size;
+    struct hashtable_entry *entry = &ht->table[hashed];
+    while(entry->name != NULL)
+    {
+        if(strcmp(hte.name, entry->name) == 0)
+        {
+            log("hash collide same name: '%s' '%s'\n", entry->name, hte.name);
+            free(entry->filedata);
+            break;
+        }
+        else if(entry->next == NULL)
+        {
+            log("hash collide: '%s' '%s'\n", entry->name, hte.name);
+            entry->next = calloc(1, sizeof(struct hashtable_entry));
+            entry = entry->next;
+            break;
+        }
+        entry = entry->next;
+    }
+    *entry = hte;
+}
+
+struct hashtable_entry *
+hashtable_find(
+        struct hashtable *ht,
+        char *filename,
+        size_t filename_size)
+{
+    uint32_t hashed = hash_sum32(filename, filename_size) % ht->size;
+    for(struct hashtable_entry *entry = &ht->table[hashed];
+            entry != NULL && entry->name != NULL;
+            entry = entry->next)
+    {
+        if(strcmp(filename, entry->name) == 0)
+        {
+            return(entry);
+        }
+    }
+    return(NULL);
+}
+
+void
+hashtable_destroy(
+        struct hashtable *ht)
+{
+    for(size_t i = 0; i < ht->size; i++)
+    {
+        free(ht->table[i].name);
+        free(ht->table[i].filedata);
+    }
+    free(ht->table);
+}
+
+size_t
+file_get_size(
+        char const *restrict filename)
+{
+    struct stat sb;
+    if(stat(filename, &sb) == -1)
+    {
+        logp("failed to get file length");
+    }
+    return(sb.st_size);
+}
+
+uint8_t
+file_is_reg(
+        char const *restrict filename)
+{
+    struct stat sb;
+
+    if(stat(filename, &sb) == -1)
+    {
+        if(errno == ENOMEM) {diep("stat");}
+        else {return(0);}
+    }
+    return((sb.st_mode & S_IFMT) == S_IFREG);
+}
+
+void
+file_cache_add_dir(
+        char *root_dir,
+        size_t root_dir_size,
+        glob_t blacklisted)
+{
+    struct dirent *dir_ent;
+    DIR *dir;
+    if((dir = opendir(root_dir)) == NULL) {diep("unable to open directory");}
+
+    while((dir_ent = readdir(dir)) != NULL)
+    {
+        size_t d_name_size = strlen(dir_ent->d_name);
+        char path[PATH_MAX];
+
+        // blacklisted prefixes
+        if (strcmp(dir_ent->d_name, ".") == 0
+                || strcmp(dir_ent->d_name, "..") == 0)
+        {
+            continue;
+        }
+
+        int path_size;
+        if(strcmp(root_dir, ".") != 0
+                && strcmp(root_dir, "./") != 0)
+        {
+            path_size = snprintf(
+                    path, sizeof(path) - 1,
+                    "%s/%s",
+                    root_dir, dir_ent->d_name);
+        }
+        else
+        {
+            memcpy(path, dir_ent->d_name, d_name_size);
+            path_size = d_name_size;
+        }
+        if(path_size > PATH_MAX) {die("path length was too long");}
+        path[path_size] = 0;
+
+        uint8_t valid = 1;
+        for(size_t i = 0;
+                i < blacklisted.gl_pathc;
+                i++)
+        {
+            if(strcmp(path, blacklisted.gl_pathv[i]) == 0)
+            {
+                valid = 0;
+            }
+        }
+        if(!valid) {continue;}
+
+        struct stat stbuf;
+        if(stat(path, &stbuf) != 0) {diep("failed to get file information");}
+
+        if(S_ISDIR(stbuf.st_mode))
+        {
+            file_cache_add_dir(path, path_size, blacklisted);
+        }
+        else
+        {
+            struct hashtable_entry hte = {0};
+            hte.name = calloc(path_size + 1, sizeof(*hte.name));
+            strncpy(hte.name, path, path_size);
+            hte.name_size = path_size;
+            hte.filedata_size = stbuf.st_size;
+            {
+                int fd = open(hte.name, O_RDONLY);
+                if(fd < 0) {die("failed to open file");}
+
+                hte.filedata = calloc(hte.filedata_size, sizeof(*hte.filedata));
+                if(read(fd, hte.filedata, hte.filedata_size) == -1)
+                {
+                    diep("failed to read file");
+                }
+
+                if(close(fd) < 0) {die("failed to close file fd");}
+            }
+            hashtable_insert(&_file_cache, hte);
+            log("cached %s\n", hte.name);
+        }
+    }
+    closedir(dir);
+}
+
 char const *
 mime_type(
         char const *restrict filename)
@@ -135,7 +343,7 @@ void
 close_server(
         void)
 {
-    log("closed server");
+    log("closed server\n");
     close(_server_fd);
 }
 
@@ -144,32 +352,6 @@ close_SSL_context(
         void)
 {
     SSL_CTX_free(_ssl_ctx);
-}
-
-size_t
-file_get_size(
-        char const *restrict filename)
-{
-    struct stat sb;
-    if(stat(filename, &sb) == -1)
-    {
-        logp("failed to get file length");
-    }
-    return(sb.st_size);
-}
-
-uint8_t
-file_is_reg(
-        char const *restrict filename)
-{
-    struct stat sb;
-
-    if(stat(filename, &sb) == -1)
-    {
-        if(errno == ENOMEM) {diep("stat");}
-        else {return(0);}
-    }
-    return((sb.st_mode & S_IFMT) == S_IFREG);
 }
 
 uint8_t
@@ -331,6 +513,7 @@ handle_connection(
         url++;
 
         /* url verification */
+        struct hashtable_entry *file_entry = NULL;
         char temp_filename[PATH_MAX] = {0};
         // index handling
         if(url_size == 0) {url = _file_index;}
@@ -347,70 +530,28 @@ handle_connection(
             memcpy(temp_filename + url_size + 1, _file_index, sizeof(_file_index)); // NOTE: has \0 at the end
             url = temp_filename;
         }
-        else
-        {
-            // blacklisted prefixes
-            uint8_t valid = 1;
-            for(size_t i = 0;
-                    i < _blacklisted.gl_pathc;
-                    i++)
-            {
-                if(strncmp(url,
-                            _blacklisted.gl_pathv[i],
-                            strlen(_blacklisted.gl_pathv[i])
-                        ) == 0)
-                {
-                    url = _file_error_404;
-                    valid = 0;
-                }
-            }
 
-            // prevent parent directory traversal
-            if(valid)
-            {
-                realpath(url, temp_filename);
-                if(memcmp(_curr_dir, temp_filename, strlen(_curr_dir)) != 0)
-                {
-                    url = _file_error_404;
-                }
-                else
-                {
-                    url = temp_filename;
-                }
-            }
-        }
         url_size = strlen(url);
-        log("NEW URL: %s\n", url);
-
-        /* find file */
-        int fd = open(url, O_RDONLY);
-        size_t file_size = 0;
+        file_entry = hashtable_find(&_file_cache, url, url_size);
 
         char *header_type = "HTTP/1.1 200 OK";
         // check 404
-        if(fd < 0)
+        if(file_entry == NULL)
         {
-            if(url == _file_error_404)
-            {
-                socket_send_static_array(ssl, _http_default_404);
-                goto EXIT_REQUEST;
-            }
-
             url = _file_error_404;
-            fd = open(url, O_RDONLY);
-            if(fd < 0)
+            file_entry = hashtable_find(&_file_cache, url, sizeof(_file_error_404) - 1);
+
+            if(file_entry == NULL)
             {
                 socket_send_static_array(ssl, _http_default_404);
                 goto EXIT_REQUEST;
             }
 
-            file_size = file_get_size(url);
             header_type = "HTTP/1.1 404 NOT FOUND";
         }
 
         /* send */
         // send header
-        file_size = file_get_size(url);
         char send_buf[SEND_HEADER_CAP] = {0};
         size_t send_buf_size = snprintf(
                 send_buf, SEND_HEADER_CAP,
@@ -421,7 +562,7 @@ handle_connection(
                 "\r\n",
                 header_type,
                 mime_type_default(url),
-                file_size);
+                file_entry->filedata_size);
         if(send_buf_size > SEND_HEADER_CAP)
         {
             log("failed to write header\n");
@@ -433,19 +574,7 @@ handle_connection(
         }
 
         // send file
-        char *file_map = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
-        if(file_map == MAP_FAILED)
-        {
-            logp("failed to mmap file");
-            goto EXIT_REQUEST;
-        }
-        if(close(fd) < 0) {die("failed to close file fd");}
-        socket_send_all(ssl, file_map, file_size); // WARN: ignore error, since we are at the end
-        if(munmap(file_map, file_size))
-        {
-            die("file munmap failed");
-        }
-
+        socket_send_all(ssl, file_entry->filedata, file_entry->filedata_size);
 
 EXIT_REQUEST:
         ssl_error = ERR_get_error();
@@ -507,6 +636,7 @@ main(
     int server_queue_size = 4096;
     struct sockaddr_in server_addr = {0};
     size_t thread_count = 16;
+    size_t file_cache_size = 256;
 
     _is_server_running = 1;
 
@@ -521,18 +651,30 @@ main(
         {
             char *arg_offset = (*arg) + sizeof("-p") - 1;
             uint16_t temp = strtol(arg_offset, &end_ptr, 10);
-            if(end_ptr != arg_offset && errno != 0) {server_port = temp;}
-            else {log("failed to parse -p option");}
+            if(end_ptr != arg_offset && errno == 0) {server_port = temp;}
+            else {die("failed to parse -p option\n");}
+            if(server_port <= 0) {die("-p must be >0");}
         }
         else if(strncmp(*arg, "-t", sizeof("-t") - 1) == 0)
         {
             char *arg_offset = (*arg) + sizeof("-t") - 1;
             size_t temp = strtol(arg_offset, &end_ptr, 10);
-            if(end_ptr != arg_offset && errno != 0) {thread_count = temp;}
-            else {log("failed to parse -t option");}
+            if(end_ptr != arg_offset && errno == 0) {thread_count = temp;}
+            else {die("failed to parse -t option\n");}
+            if(thread_count <= 0) {die("-t must be >0");}
+        }
+        else if(strncmp(*arg, "-c", sizeof("-c") - 1) == 0)
+        {
+            char *arg_offset = (*arg) + sizeof("-c") - 1;
+            size_t temp = strtol(arg_offset, &end_ptr, 10);
+            if(end_ptr != arg_offset && errno == 0) {file_cache_size = temp;}
+            else {die("failed to parse -c option\n");}
+            if(file_cache_size <= 0) {die("-c must be >0");}
         }
     }
-    printf("%d %ld\n", server_port, thread_count);
+    log("options: port: %d\n", server_port);
+    log("options: thread count: %ld\n", thread_count);
+    log("options: file cache size: %ld\n", file_cache_size);
 
     // ignore SIGPIPE
     struct sigaction act = {0};
@@ -608,14 +750,31 @@ main(
     }
 
     // setup blacklist paths
+    glob_t blacklisted = {0};
     for(size_t i = 0;
             i < static_array_size(_blacklisted_config);
             i++)
     {
         int flags = GLOB_MARK | GLOB_NOSORT;
         if(i != 0) {flags |= GLOB_APPEND;}
-        glob(_blacklisted_config[i], flags, NULL, &_blacklisted);
+        glob(_blacklisted_config[i], flags, NULL, &blacklisted);
     }
+    // remove trailing slash
+    for(size_t i = 0;
+            i < blacklisted.gl_pathc;
+            i++)
+    {
+        size_t len = strlen(blacklisted.gl_pathv[i]);
+        if(blacklisted.gl_pathv[i][len - 1] == '/')
+        {
+            blacklisted.gl_pathv[i][len - 1] = '\0';
+        }
+    }
+
+    hashtable_init(&_file_cache, file_cache_size);
+    file_cache_add_dir(".", sizeof(".") - 1, blacklisted);
+
+    globfree(&blacklisted);
 
     // spawn recv/send threads
     void *thread_alloc_block = calloc(
@@ -698,7 +857,7 @@ EXIT:
         pthread_join(console_thread, &pret);
     }
 
-    globfree(&_blacklisted);
+    hashtable_destroy(&_file_cache);
 
     return(0);
 }
