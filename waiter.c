@@ -109,6 +109,7 @@ hashtable_init(
 {
     ht->size = size;
     ht->table = calloc(ht->size, sizeof(*ht->table));
+    if(ht->table == NULL) {die("failed to allocate hash table");}
 }
 
 uint32_t
@@ -144,6 +145,7 @@ hashtable_insert(
         {
             log("hash collide: '%s' '%s'\n", entry->name, hte.name);
             entry->next = calloc(1, sizeof(struct hashtable_entry));
+            if(entry->next == NULL) {die("failed to allocate hashtable entry");}
             entry = entry->next;
             break;
         }
@@ -271,6 +273,7 @@ file_cache_add_dir(
         {
             struct hashtable_entry hte = {0};
             hte.name = calloc(path_size + 1, sizeof(*hte.name));
+            if(hte.name == NULL) {die("failed to allocate hashtable entry name");}
             strncpy(hte.name, path, path_size);
             hte.name_size = path_size;
             hte.filedata_size = stbuf.st_size;
@@ -279,6 +282,7 @@ file_cache_add_dir(
                 if(fd < 0) {die("failed to open file");}
 
                 hte.filedata = calloc(hte.filedata_size, sizeof(*hte.filedata));
+                if(hte.filedata == NULL) {die("failed to allocate hashtable entry data");}
                 if(read(fd, hte.filedata, hte.filedata_size) == -1)
                 {
                     diep("failed to read file");
@@ -598,9 +602,9 @@ void *
 handle_console(
         void *dataPtr)
 {
-    char *line;
-    size_t line_capacity;
-    size_t line_size;
+    char *line = NULL;
+    size_t line_capacity = 0;
+    ssize_t line_size = 0;
 
     // TODO(andrew): raw mode
     while(_is_server_running)
@@ -630,6 +634,7 @@ handle_console(
     }
 
 EXIT:
+    if(line != NULL) {free(line);}
     log("server is closing\n");
     return(NULL);
 }
@@ -787,6 +792,7 @@ main(
     void *thread_alloc_block = calloc(
             thread_count * 2,
             sizeof(pthread_t) + sizeof(struct thread_data));
+    if(thread_alloc_block == NULL) {die("failed to allocate thread data");}
     pthread_t *thread_ids = thread_alloc_block;
     struct thread_data *thread_data_arr = (struct thread_data *)(thread_ids + thread_count);
     for(size_t i = 0; i < thread_count; i++)
@@ -854,21 +860,9 @@ main(
         }
 
         // add to thread client
-        uint8_t found_thread = 0;
-        while(1)
+        while(thread_data_arr[thread_to_add_to].client != -1)
         {
-            for(size_t i = thread_to_add_to + 1;
-                    i != thread_to_add_to;
-                    i = (i + 1) % thread_count)
-            {
-                if(thread_data_arr[thread_to_add_to].client == -1)
-                {
-                    found_thread = 1;
-                    break;
-                }
-            }
-            if(found_thread) {break;}
-            usleep(1000);
+            thread_to_add_to = (thread_to_add_to + 1) % thread_count;
         }
         thread_data_arr[thread_to_add_to].client = client_fd;
         sem_post(&thread_data_arr[thread_to_add_to].notify);
@@ -887,6 +881,8 @@ EXIT:
     }
 
     hashtable_destroy(&_file_cache);
+
+    free(thread_alloc_block);
 
     return(0);
 }
