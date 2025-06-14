@@ -28,8 +28,8 @@
 
 #define log(...) fprintf(stderr, PROGRAM_NAME": "__VA_ARGS__)
 #define logp(msg) perror(PROGRAM_NAME": "msg)
-#define die(...) {sem_wait(&_die_lock); log("ERROR: "__VA_ARGS__); putc('\n', stderr); exit(-1);}
-#define diep(msg) {sem_wait(&_die_lock); logp("ERROR: "msg); exit(-1);}
+#define die(...) {sem_wait(&_lock_die); log("ERROR: "__VA_ARGS__); putc('\n', stderr); exit(-1);}
+#define diep(msg) {sem_wait(&_lock_die); logp("ERROR: "msg); exit(-1);}
 #define static_array_size(arr) sizeof(arr) / sizeof(*(arr))
 #define socket_send_static_array(ssl, arr) (socket_send_all(ssl, arr, sizeof(arr)))
 
@@ -47,12 +47,6 @@
 #define FILE_CERT_PRIVATE_KEY "certs/key.pem"
 
 // structs
-struct thread_data
-{
-    int client;
-    sem_t notify;
-};
-
 struct hashtable_entry
 {
     char *name;
@@ -90,7 +84,8 @@ char _http_default_500[] =
 
 // globals
 uint8_t _is_server_running = 1;
-sem_t _die_lock = {0};
+sem_t _lock_die = {0};
+sem_t _lock_server = {0};
 char _curr_dir[PATH_MAX] = {0};
 int _server_fd = 0;
 SSL_CTX *_ssl_ctx = NULL;
@@ -381,44 +376,32 @@ void *
 handle_connection(
         void *data_ptr)
 {
-    struct thread_data *data = data_ptr;
     unsigned long ssl_error = 0;
-    struct timespec ts = {0};
+
+    pthread_detach(pthread_self());
 
     while(_is_server_running)
     {
-        do
-        {
-            if (clock_gettime(CLOCK_REALTIME, &ts) == -1)
-            {
-                diep("clock_gettime");
-            }
+        struct sockaddr_in client_addr = {0};
+        socklen_t client_addr_size = sizeof(client_addr);
+        int client_fd = 0;
 
-            ts.tv_nsec += 100 * 1000000; // ms * (ns/ms)
-            if(ts.tv_nsec > 1000 * 1000000)
+        // accept client
+        sem_wait(&_lock_server);
+        {
+            if((client_fd = accept(_server_fd,
+                            (struct sockaddr *)&client_addr,
+                            &client_addr_size)
+                        ) < 0)
             {
-                ts.tv_nsec = 0;
-                ts.tv_sec += 1;
-            }
-            if(sem_timedwait(&data->notify, &ts) == -1)
-            {
-                if(!_is_server_running)
+                if(errno != EAGAIN && errno != EWOULDBLOCK)
                 {
-                    goto EXIT;
+                    logp("failed to accept a connection\n");
                 }
-                else if(errno != EINVAL
-                        && errno != ETIMEDOUT
-                        && errno != EAGAIN)
-                {
-                    _is_server_running = 0;
-                    die("failed to wait on sem\n");
-                }
+                continue;
             }
-            else
-            {
-                break;
-            }
-        } while(1);
+        }
+        sem_post(&_lock_server);
 
         // init SSL connection
         SSL *ssl = 0;
@@ -427,7 +410,7 @@ handle_connection(
             log("failed to create SSL connection struct\n");
             goto EXIT_REQUEST_CLOSE;
         }
-        if (!SSL_set_fd(ssl, data->client))
+        if (!SSL_set_fd(ssl, client_fd))
         {
             log("failed to link client fd to SSL connection struct\n");
             goto EXIT_REQUEST;
@@ -590,52 +573,10 @@ EXIT_REQUEST:
         SSL_free(ssl);
 
 EXIT_REQUEST_CLOSE:
-        if(close(data->client) < 0) {die("failed to close client fd");}
-        data->client = -1;
+        if(close(client_fd) < 0) {die("failed to close client fd");}
+        client_fd = -1;
     }
 
-EXIT:
-    return(NULL);
-}
-
-void *
-handle_console(
-        void *dataPtr)
-{
-    char *line = NULL;
-    size_t line_capacity = 0;
-    ssize_t line_size = 0;
-
-    // TODO(andrew): raw mode
-    while(_is_server_running)
-    {
-        fwrite("$ ", 1, 2, stdout);
-        fflush(stdout);
-
-        line_size = getline(&line, &line_capacity, stdin);
-        while(line_size > 0
-                && (line[line_size - 1] == '\n'
-                    || line[line_size - 1] == '\r'))
-        {
-            line_size--;
-        }
-
-        if(line_size == -1 || strncmp(line, "exit", line_size) == 0)
-        {
-            _is_server_running = 0;
-            goto EXIT;
-        }
-        else if(strncmp(line, "clear", line_size) == 0)
-        {
-            char *msg = "\033[2J\033[H";
-            printf("%s", msg);
-        }
-        // TODO(andrew): allow reloading of the file system
-    }
-
-EXIT:
-    if(line != NULL) {free(line);}
-    log("server is closing\n");
     return(NULL);
 }
 
@@ -652,8 +593,9 @@ main(
 
     _is_server_running = 1;
 
-    // die lock
-    sem_init(&_die_lock, 0, 1);
+    // init locks
+    sem_init(&_lock_die, 0, 1);
+    sem_init(&_lock_server, 0, 1);
 
     // args
     for (char **arg = argv; *arg != NULL; arg++)
@@ -699,7 +641,7 @@ main(
     }
 
     // get socket
-    if((_server_fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0)) < 0)
+    if((_server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
     {
         diep("failed to create server socket");
     }
@@ -789,100 +731,57 @@ main(
     globfree(&blacklisted);
 
     // spawn recv/send threads
-    void *thread_alloc_block = calloc(
-            thread_count * 2,
-            sizeof(pthread_t) + sizeof(struct thread_data));
-    if(thread_alloc_block == NULL) {die("failed to allocate thread data");}
-    pthread_t *thread_ids = thread_alloc_block;
-    struct thread_data *thread_data_arr = (struct thread_data *)(thread_ids + thread_count);
     for(size_t i = 0; i < thread_count; i++)
     {
-        thread_data_arr[i].client = -1;
-        if(sem_init(&thread_data_arr[i].notify, 0, 0) != 0)
-        {
-            diep("failed to init notify semaphore");
-        }
-
+        pthread_t tid;
         if(pthread_create(
-                    &thread_ids[i],
+                    &tid,
                     NULL,
                     handle_connection,
-                    &thread_data_arr[i]
+                    NULL
                 ) != 0)
         {
             diep("failed to spawn thread");
         }
     }
 
-    // spawn console thread
-    pthread_t console_thread;
-    if(pthread_create(
-                &console_thread,
-                NULL,
-                handle_console,
-                NULL
-            ) != 0)
-    {
-        diep("failed to spawn thread");
-    }
+    // console loop
+    char *line = NULL;
+    size_t line_capacity = 0;
+    ssize_t line_size = 0;
 
-    // accept loop
-    size_t thread_to_add_to = 0;
-    struct pollfd poll_server = {
-        .fd = _server_fd,
-        .events = POLLIN,
-        .revents = 0,
-    };
+    // TODO(andrew): raw mode
     while(_is_server_running)
     {
-        struct sockaddr_in client_addr = {0};
-        socklen_t client_addr_size = sizeof(client_addr);
-        int client_fd = 0;
+        fwrite("$ ", 1, 2, stdout);
+        fflush(stdout);
 
-        // get
-        while(1)
+        line_size = getline(&line, &line_capacity, stdin);
+        while(line_size > 0
+                && (line[line_size - 1] == '\n'
+                    || line[line_size - 1] == '\r'))
         {
-            if(poll(&poll_server, 1, 100) == -1) {die("failed to poll on server port");}
-            if(!_is_server_running) {goto EXIT;}
-
-            if((client_fd = accept(_server_fd,
-                            (struct sockaddr *)&client_addr,
-                            &client_addr_size)
-                        ) < 0)
-            {
-                if(errno == EAGAIN || errno == EWOULDBLOCK) {continue;}
-                else {logp("failed to accept a connection\n");}
-            }
-            else
-            {
-                break;
-            }
+            line_size--;
         }
 
-        // add to thread client
-        while(thread_data_arr[thread_to_add_to].client != -1)
+        if(line_size == -1 || strncmp(line, "exit", line_size) == 0)
         {
-            thread_to_add_to = (thread_to_add_to + 1) % thread_count;
+            _is_server_running = 0;
+            goto EXIT;
         }
-        thread_data_arr[thread_to_add_to].client = client_fd;
-        sem_post(&thread_data_arr[thread_to_add_to].notify);
+        else if(strncmp(line, "clear", line_size) == 0)
+        {
+            char *msg = "\033[2J\033[H";
+            printf("%s", msg);
+        }
+        // TODO(andrew): allow reloading of the file system
     }
 
 EXIT:
-    for(size_t i = 0; i < thread_count; i++)
-    {
-        void *pret;
-        pthread_join(thread_ids[i], &pret);
-    }
-
-    {
-        void *pret;
-        pthread_join(console_thread, &pret);
-    }
+    if(line != NULL) {free(line);}
+    log("server is closing\n");
 
     hashtable_destroy(&_file_cache);
-
-    free(thread_alloc_block);
 
     return(0);
 }
