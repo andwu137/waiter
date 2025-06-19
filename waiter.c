@@ -408,34 +408,34 @@ handle_connection(
         if((ssl = SSL_new(_ssl_ctx)) == NULL)
         {
             log("failed to create SSL connection struct\n");
-            goto EXIT_REQUEST_CLOSE;
+            goto EXIT_REQUEST;
         }
         if (!SSL_set_fd(ssl, client_fd))
         {
             log("failed to link client fd to SSL connection struct\n");
-            goto EXIT_REQUEST;
+            goto EXIT_REQUEST_SSL;
         }
         if (SSL_accept(ssl) <= 0)
         {
             log("SSL connection rejected due bad client / internal error\n");
-            goto EXIT_REQUEST;
+            goto EXIT_REQUEST_SSL;
         }
 
         char recv_buf[RECV_BUFFER_CAP] = {0};
         ssize_t recv_buf_size = 0;
         recv_buf_size = SSL_read(ssl, recv_buf, RECV_BUFFER_CAP); // TODO: unfinished reads
-        if(recv_buf_size == 0) {goto EXIT_REQUEST;}
+        if(recv_buf_size <= 0) {goto EXIT_REQUEST_SSL;} // TODO: check if this is recoverable
         if(recv_buf_size == RECV_BUFFER_CAP) // NOTE: we do not support dynamic size request
         {
             do // 'finish' read
             {
                 recv_buf_size = SSL_read(ssl, recv_buf, RECV_BUFFER_CAP);
-                if(recv_buf_size == 0) {goto EXIT_REQUEST;}
+                if(recv_buf_size <= 0) {goto EXIT_REQUEST_SSL;} // TODO: check if this is recoverable
             } while(recv_buf_size == RECV_BUFFER_CAP);
             socket_send_static_array(ssl, _http_default_417);
-            goto EXIT_REQUEST;
+            goto EXIT_REQUEST_SSL;
         }
-        if(recv_buf_size < 0) {goto EXIT_REQUEST;}
+        if(recv_buf_size < 0) {goto EXIT_REQUEST_SSL;}
         char *recv_buf_end = recv_buf + recv_buf_size;
 
         // recv parse
@@ -452,7 +452,7 @@ handle_connection(
         if(url == recv_buf_end)
         {
             socket_send_static_array(ssl, _http_default_417);
-            goto EXIT_REQUEST;
+            goto EXIT_REQUEST_SSL;
         }
 
         params = url;
@@ -464,7 +464,7 @@ handle_connection(
         if(params == recv_buf_end)
         {
             socket_send_static_array(ssl, _http_default_417);
-            goto EXIT_REQUEST;
+            goto EXIT_REQUEST_SSL;
         }
 
         for(rest = protocol; rest < recv_buf_end; rest++)
@@ -474,16 +474,16 @@ handle_connection(
         if(rest == recv_buf_end)
         {
             socket_send_static_array(ssl, _http_default_417);
-            goto EXIT_REQUEST;
+            goto EXIT_REQUEST_SSL;
         }
 
         // verify request parameters
-        if(strcmp(method, "GET") != 0) {log("failed: was not GET\n"); goto EXIT_REQUEST;}
+        if(strcmp(method, "GET") != 0) {log("failed: was not GET\n"); goto EXIT_REQUEST_SSL;}
         if(strcmp(protocol, "HTTP/1.0") != 0
                 && strcmp(protocol, "HTTP/1.1") != 0)
         {
             log("failed: http protocol was not supported: %s\n", protocol);
-            goto EXIT_REQUEST;
+            goto EXIT_REQUEST_SSL;
         }
         log(">>> URL: %s\n", url);
         if(params != url) {log("PARAMS: %s\n", params);}
@@ -492,7 +492,7 @@ handle_connection(
         size_t url_size = strlen(url);
         if(user_handle_url(ssl, url, url_size))
         {
-            goto EXIT_REQUEST;
+            goto EXIT_REQUEST_SSL;
         }
 
         // strip leading slash
@@ -531,7 +531,7 @@ handle_connection(
             if(file_entry == NULL)
             {
                 socket_send_static_array(ssl, _http_default_404);
-                goto EXIT_REQUEST;
+                goto EXIT_REQUEST_SSL;
             }
 
             header_type = "HTTP/1.1 404 NOT FOUND";
@@ -553,17 +553,17 @@ handle_connection(
         if(send_buf_size > SEND_HEADER_CAP)
         {
             log("failed to write header\n");
-            goto EXIT_REQUEST;
+            goto EXIT_REQUEST_SSL;
         }
         if(!socket_send_all(ssl, send_buf, send_buf_size))
         {
-            goto EXIT_REQUEST;
+            goto EXIT_REQUEST_SSL;
         }
 
         // send file
         socket_send_all(ssl, file_entry->filedata, file_entry->filedata_size);
 
-EXIT_REQUEST:
+EXIT_REQUEST_SSL:
         ssl_error = ERR_get_error();
         if (ssl_error != SSL_ERROR_SYSCALL && ssl_error != SSL_ERROR_SSL)
         {
@@ -572,7 +572,7 @@ EXIT_REQUEST:
 
         SSL_free(ssl);
 
-EXIT_REQUEST_CLOSE:
+EXIT_REQUEST:
         if(close(client_fd) < 0) {die("failed to close client fd");}
         client_fd = -1;
     }
