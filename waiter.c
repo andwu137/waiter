@@ -757,34 +757,6 @@ main(
     ssize_t line_size = 0;
 
     // TODO(andrew): raw mode
-    while(_is_server_running)
-    {
-        fwrite("$ ", 1, 2, stdout);
-        fflush(stdout);
-
-        line_size = getline(&line, &line_capacity, stdin);
-        while(line_size > 0
-                && (line[line_size - 1] == '\n'
-                    || line[line_size - 1] == '\r'))
-        {
-            line_size--;
-        }
-
-        if(line_size == -1 || strncmp(line, "exit", line_size) == 0)
-        {
-            _is_server_running = 0;
-            goto EXIT;
-        }
-        else if(strncmp(line, "clear", line_size) == 0)
-        {
-            char *msg = "\033[2J\033[H";
-            printf("%s", msg);
-        }
-        // TODO(andrew): allow reloading of the file system
-    }
-
-EXIT:
-    _is_server_running = 0;
     if(no_console)
     {
         for(size_t i = 0; i < thread_count; i++)
@@ -792,6 +764,37 @@ EXIT:
             pthread_join(thread_ids[i], NULL);
         }
     }
+    else
+    {
+        while(_is_server_running)
+        {
+            fwrite("$ ", 1, 2, stdout);
+            fflush(stdout);
+
+            line_size = getline(&line, &line_capacity, stdin);
+            while(line_size > 0
+                    && (line[line_size - 1] == '\n'
+                        || line[line_size - 1] == '\r'))
+            {
+                line_size--;
+            }
+
+            if(line_size == -1 || strncmp(line, "exit", line_size) == 0)
+            {
+                _is_server_running = 0;
+                goto EXIT;
+            }
+            else if(strncmp(line, "clear", line_size) == 0)
+            {
+                char *msg = "\033[2J\033[H";
+                printf("%s", msg);
+            }
+            // TODO(andrew): allow reloading of the file system
+        }
+    }
+
+EXIT:
+    _is_server_running = 0;
 
     if(line != NULL) {free(line);}
     log("server is closing\n");
