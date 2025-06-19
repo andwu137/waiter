@@ -83,7 +83,7 @@ char _http_default_500[] =
     "500 - internal server error";
 
 // globals
-uint8_t _is_server_running = 1;
+volatile uint8_t _is_server_running = 1;
 sem_t _lock_die = {0};
 sem_t _lock_server = {0};
 char _curr_dir[PATH_MAX] = {0};
