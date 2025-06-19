@@ -590,6 +590,7 @@ main(
     struct sockaddr_in server_addr = {0};
     size_t thread_count = 16;
     size_t file_cache_size = 256;
+    uint8_t no_console = 0;
 
     _is_server_running = 1;
 
@@ -625,10 +626,15 @@ main(
             else {die("failed to parse -c option\n");}
             if(file_cache_size <= 0) {die("-c must be >0");}
         }
+        else if(strncmp(*arg, "-n", sizeof("-n") - 1) == 0)
+        {
+            no_console = 1;
+        }
     }
     log("options: port: %d\n", server_port);
     log("options: thread count: %ld\n", thread_count);
     log("options: file cache size: %ld\n", file_cache_size);
+    log("options: no console: %d\n", no_console);
 
     // ignore SIGPIPE
     struct sigaction act = {0};
@@ -731,11 +737,11 @@ main(
     globfree(&blacklisted);
 
     // spawn recv/send threads
+    pthread_t *thread_ids = calloc(thread_count, sizeof(*thread_ids));
     for(size_t i = 0; i < thread_count; i++)
     {
-        pthread_t tid;
         if(pthread_create(
-                    &tid,
+                    &thread_ids[i],
                     NULL,
                     handle_connection,
                     NULL
@@ -778,6 +784,15 @@ main(
     }
 
 EXIT:
+    _is_server_running = 0;
+    if(no_console)
+    {
+        for(size_t i = 0; i < thread_count; i++)
+        {
+            pthread_join(thread_ids[i], NULL);
+        }
+    }
+
     if(line != NULL) {free(line);}
     log("server is closing\n");
 
