@@ -378,8 +378,6 @@ handle_connection(
 {
     unsigned long ssl_error = 0;
 
-    pthread_detach(pthread_self());
-
     while(_is_server_running)
     {
         struct sockaddr_in client_addr = {0};
