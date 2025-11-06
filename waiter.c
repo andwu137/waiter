@@ -28,14 +28,12 @@
 
 #define log(...) fprintf(stderr, PROGRAM_NAME": "__VA_ARGS__)
 #define logp(msg) perror(PROGRAM_NAME": "msg)
-#define die(...) {sem_wait(&_lock_die); log("ERROR: "__VA_ARGS__); putc('\n', stderr); exit(-1);}
-#define diep(msg) {sem_wait(&_lock_die); logp("ERROR: "msg); exit(-1);}
-#define static_array_size(arr) sizeof(arr) / sizeof(*(arr))
-#define socket_send_static_array(ssl, arr) (socket_send_all(ssl, arr, sizeof(arr)))
+#define die(...) do {sem_wait(&g_lock_die); log("ERROR: "__VA_ARGS__); putc('\n', stderr); exit(-1);} while(0)
+#define diep(msg) do {sem_wait(&g_lock_die); logp("ERROR: "msg); exit(-1);} while(0)
+#define static_array_size(arr) (sizeof(arr) / sizeof(*(arr)))
+#define socket_send_static_array(ssl, arr) socket_send_all(ssl, arr, sizeof(arr))
 
 // constants
-#define RECV_BUFFER_CAP 8192
-#define SEND_HEADER_CAP 2048
 #if defined(DEBUG)
 #   define HTTP_HEADER_CACHE "Clear-Site-Data: \"*\"\r\n"
 #else
@@ -83,21 +81,27 @@ char _http_default_500[] =
     "500 - internal server error";
 
 // globals
-volatile uint8_t _is_server_running = 1;
-sem_t _lock_die = {0};
-sem_t _lock_server = {0};
-char _curr_dir[PATH_MAX] = {0};
-int _server_fd = 0;
-SSL_CTX *_ssl_ctx = NULL;
-char _file_index[] = "index.html";
-char _file_error_404[] = "404.html";
-char *_blacklisted_config[] = {
+volatile uint8_t g_is_server_running = 1;
+
+sem_t g_lock_die = {0};
+sem_t g_lock_server = {0};
+
+size_t g_recv_buffer_cap = 8192;
+size_t g_send_header_cap = 4096;
+
+int g_server_fd = 0;
+SSL_CTX *g_ssl_ctx = NULL;
+
+char g_file_index[] = "index.html";
+char g_file_error_404[] = "404.html";
+
+char *g_blacklisted_config[] = {
     ".git/",
 };
-struct hashtable _file_cache;
+struct hashtable g_file_cache;
 
 // functions
-void
+static void
 hashtable_init(
         struct hashtable *ht,
         size_t size)
@@ -107,7 +111,7 @@ hashtable_init(
     if(ht->table == NULL) {die("failed to allocate hash table");}
 }
 
-uint32_t
+static uint32_t
 hash_sum32(
         char *data,
         size_t data_size)
@@ -121,7 +125,7 @@ hash_sum32(
     return hash;
 }
 
-void
+static void
 hashtable_insert(
         struct hashtable *ht,
         struct hashtable_entry hte)
@@ -149,7 +153,7 @@ hashtable_insert(
     *entry = hte;
 }
 
-struct hashtable_entry *
+static struct hashtable_entry *
 hashtable_find(
         struct hashtable *ht,
         char *filename,
@@ -168,7 +172,7 @@ hashtable_find(
     return(NULL);
 }
 
-void
+static void
 hashtable_destroy(
         struct hashtable *ht)
 {
@@ -180,19 +184,7 @@ hashtable_destroy(
     free(ht->table);
 }
 
-size_t
-file_get_size(
-        char const *restrict filename)
-{
-    struct stat sb;
-    if(stat(filename, &sb) == -1)
-    {
-        logp("failed to get file length");
-    }
-    return(sb.st_size);
-}
-
-uint8_t
+static uint8_t
 file_is_reg(
         char const *restrict filename)
 {
@@ -206,10 +198,9 @@ file_is_reg(
     return((sb.st_mode & S_IFMT) == S_IFREG);
 }
 
-void
+static void
 file_cache_add_dir(
         char *root_dir,
-        size_t root_dir_size,
         glob_t blacklisted)
 {
     struct dirent *dir_ent;
@@ -262,7 +253,7 @@ file_cache_add_dir(
 
         if(S_ISDIR(stbuf.st_mode))
         {
-            file_cache_add_dir(path, path_size, blacklisted);
+            file_cache_add_dir(path, blacklisted);
         }
         else
         {
@@ -285,14 +276,14 @@ file_cache_add_dir(
 
                 if(close(fd) < 0) {die("failed to close file fd");}
             }
-            hashtable_insert(&_file_cache, hte);
+            hashtable_insert(&g_file_cache, hte);
             log("cached %s\n", hte.name);
         }
     }
     closedir(dir);
 }
 
-char const *
+static char const *
 mime_type(
         char const *restrict filename)
 {
@@ -311,7 +302,7 @@ mime_type(
     return(NULL);
 }
 
-char const *
+static char const *
 mime_type_default(
         char const *restrict filename)
 {
@@ -319,7 +310,7 @@ mime_type_default(
     return(mime == NULL ? _mime_types[0][1] : mime);
 }
 
-uint8_t
+static uint8_t
 socket_send_all(
         SSL* ssl,
         char const *restrict buf,
@@ -338,102 +329,118 @@ socket_send_all(
     return(1);
 }
 
-void
+static void
 close_server(
         void)
 {
     log("closed server\n");
-    close(_server_fd);
+    close(g_server_fd);
 }
 
-void
+static void
+signal_handle_int(
+        int)
+{
+    g_is_server_running = 0;
+    log("server is closing\n");
+}
+
+static void
 close_SSL_context(
         void)
 {
-    SSL_CTX_free(_ssl_ctx);
+    SSL_CTX_free(g_ssl_ctx);
 }
 
-uint8_t
-user_handle_url(
-        SSL* ssl,
-        const char *restrict url,
-        size_t url_size)
-{
-    if(strcmp(url, "/config") == 0 && 0)
-    {
-        char *buffer =
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: text/html\r\n"
-                "Content-Length: 28\r\n" // WARN: relies on the string length below
-                "\r\n"
-                "<html><body>hi</body></html>";
-        return(socket_send_all(ssl, buffer, strlen(buffer)));
-    }
-    return(0);
-}
-
-void *
+static void *
 handle_connection(
-        void *data_ptr)
+        void *)
 {
     unsigned long ssl_error = 0;
+    char *recv_buf = calloc(g_recv_buffer_cap, sizeof(char));
+    char *send_header_buf = calloc(g_send_header_cap, sizeof(char));
 
-    while(_is_server_running)
+RESUME:;
+    while(g_is_server_running)
     {
         struct sockaddr_in client_addr = {0};
         socklen_t client_addr_size = sizeof(client_addr);
         int client_fd = 0;
 
-        // accept client
-        sem_wait(&_lock_server);
+        // get wait time
+        struct timespec client_wait_time = {0};
+        if (clock_gettime(CLOCK_REALTIME, &client_wait_time) == -1) {goto EXIT;}
+        client_wait_time.tv_sec += 1;
+
+        // try to get the lock
         {
-            if((client_fd = accept(_server_fd,
+            int s;
+            while(((s = sem_timedwait(&g_lock_server, &client_wait_time)) == -1)
+                    && errno == EINTR)
+            {
+            }
+
+            if(s == -1)
+            {
+                if(errno == ETIMEDOUT) {goto RESUME;}
+                else {goto EXIT;}
+            }
+        }
+
+        // accept client
+        for(;;)
+        {
+            if(!g_is_server_running) {goto EXIT;}
+            if((client_fd = accept(g_server_fd,
                             (struct sockaddr *)&client_addr,
                             &client_addr_size)
                         ) < 0)
             {
                 if(errno != EAGAIN && errno != EWOULDBLOCK)
                 {
-                    logp("failed to accept a connection\n");
+                    logp("failed to accept a connection");
+                    sleep(1);
                 }
-                continue;
+                usleep(1000);
             }
+            else {break;}
         }
-        sem_post(&_lock_server);
+
+        // allow next thread to attempt lock
+        sem_post(&g_lock_server);
 
         // init SSL connection
         SSL *ssl = 0;
-        if((ssl = SSL_new(_ssl_ctx)) == NULL)
+        if((ssl = SSL_new(g_ssl_ctx)) == NULL)
         {
             log("failed to create SSL connection struct\n");
-            goto EXIT_REQUEST;
+            goto FINISH_REQUEST;
         }
         if (!SSL_set_fd(ssl, client_fd))
         {
             log("failed to link client fd to SSL connection struct\n");
-            goto EXIT_REQUEST_SSL;
+            goto FINISH_REQUEST_SSL;
         }
         if (SSL_accept(ssl) <= 0)
         {
             log("SSL connection rejected due bad client / internal error\n");
-            goto EXIT_REQUEST_SSL;
+            goto FINISH_REQUEST_SSL;
         }
 
-        char recv_buf[RECV_BUFFER_CAP] = {0};
         ssize_t recv_buf_size = 0;
-        recv_buf_size = SSL_read(ssl, recv_buf, RECV_BUFFER_CAP); // TODO: unfinished reads
-        if(recv_buf_size <= 0) {goto EXIT_REQUEST_SSL;} // TODO: check if this is recoverable
-        if(recv_buf_size == RECV_BUFFER_CAP) // NOTE: we do not support dynamic size request
+        recv_buf_size = SSL_read(ssl, recv_buf, g_recv_buffer_cap); // TODO: unfinished reads
+        if(recv_buf_size <= 0) {goto FINISH_REQUEST_SSL;} // TODO: check if this is recoverable
+        if(recv_buf_size == (ssize_t)g_recv_buffer_cap) // NOTE: we do not support dynamic size request
         {
             do // 'finish' read
             {
-                recv_buf_size = SSL_read(ssl, recv_buf, RECV_BUFFER_CAP);
-                if(recv_buf_size <= 0) {goto EXIT_REQUEST_SSL;} // TODO: check if this is recoverable
-            } while(recv_buf_size == RECV_BUFFER_CAP);
+                recv_buf_size = SSL_read(ssl, recv_buf, g_recv_buffer_cap);
+                if(recv_buf_size <= 0) {goto FINISH_REQUEST_SSL;} // TODO: check if this is recoverable
+            } while(recv_buf_size == (ssize_t)g_recv_buffer_cap);
             socket_send_static_array(ssl, _http_default_417);
-            goto EXIT_REQUEST_SSL;
+            goto FINISH_REQUEST_SSL;
         }
-        if(recv_buf_size < 0) {goto EXIT_REQUEST_SSL;}
+        if(recv_buf_size < 0) {goto FINISH_REQUEST_SSL;}
         char *recv_buf_end = recv_buf + recv_buf_size;
 
         // recv parse
@@ -450,7 +457,7 @@ handle_connection(
         if(url == recv_buf_end)
         {
             socket_send_static_array(ssl, _http_default_417);
-            goto EXIT_REQUEST_SSL;
+            goto FINISH_REQUEST_SSL;
         }
 
         params = url;
@@ -462,7 +469,7 @@ handle_connection(
         if(params == recv_buf_end)
         {
             socket_send_static_array(ssl, _http_default_417);
-            goto EXIT_REQUEST_SSL;
+            goto FINISH_REQUEST_SSL;
         }
 
         for(rest = protocol; rest < recv_buf_end; rest++)
@@ -472,26 +479,22 @@ handle_connection(
         if(rest == recv_buf_end)
         {
             socket_send_static_array(ssl, _http_default_417);
-            goto EXIT_REQUEST_SSL;
+            goto FINISH_REQUEST_SSL;
         }
 
         // verify request parameters
-        if(strcmp(method, "GET") != 0) {log("failed: was not GET\n"); goto EXIT_REQUEST_SSL;}
+        if(strcmp(method, "GET") != 0) {log("failed: was not GET\n"); goto FINISH_REQUEST_SSL;}
         if(strcmp(protocol, "HTTP/1.0") != 0
                 && strcmp(protocol, "HTTP/1.1") != 0)
         {
             log("failed: http protocol was not supported: %s\n", protocol);
-            goto EXIT_REQUEST_SSL;
+            goto FINISH_REQUEST_SSL;
         }
         log(">>> URL: %s\n", url);
         if(params != url) {log("PARAMS: %s\n", params);}
 
-        /* handle request */
+        /* parse url */
         size_t url_size = strlen(url);
-        if(user_handle_url(ssl, url, url_size))
-        {
-            goto EXIT_REQUEST_SSL;
-        }
 
         // strip leading slash
         url_size--;
@@ -501,35 +504,35 @@ handle_connection(
         struct hashtable_entry *file_entry = NULL;
         char temp_filename[PATH_MAX] = {0};
         // index handling
-        if(url_size == 0) {url = _file_index;}
+        if(url_size == 0) {url = g_file_index;}
         else if(url[url_size - 1] == '/')
         {
             memcpy(temp_filename, url, url_size);
-            memcpy(temp_filename + url_size, _file_index, sizeof(_file_index)); // NOTE: has \0 at the end
+            memcpy(temp_filename + url_size, g_file_index, sizeof(g_file_index)); // NOTE: has \0 at the end
             url = temp_filename;
         }
         else if(!file_is_reg(url))
         {
             memcpy(temp_filename, url, url_size);
             temp_filename[url_size] = '/';
-            memcpy(temp_filename + url_size + 1, _file_index, sizeof(_file_index)); // NOTE: has \0 at the end
+            memcpy(temp_filename + url_size + 1, g_file_index, sizeof(g_file_index)); // NOTE: has \0 at the end
             url = temp_filename;
         }
 
         url_size = strlen(url);
-        file_entry = hashtable_find(&_file_cache, url, url_size);
+        file_entry = hashtable_find(&g_file_cache, url, url_size);
 
         char *header_type = "HTTP/1.1 200 OK";
         // check 404
         if(file_entry == NULL)
         {
-            url = _file_error_404;
-            file_entry = hashtable_find(&_file_cache, url, sizeof(_file_error_404) - 1);
+            url = g_file_error_404;
+            file_entry = hashtable_find(&g_file_cache, url, sizeof(g_file_error_404) - 1);
 
             if(file_entry == NULL)
             {
                 socket_send_static_array(ssl, _http_default_404);
-                goto EXIT_REQUEST_SSL;
+                goto FINISH_REQUEST_SSL;
             }
 
             header_type = "HTTP/1.1 404 NOT FOUND";
@@ -537,9 +540,8 @@ handle_connection(
 
         /* send */
         // send header
-        char send_buf[SEND_HEADER_CAP] = {0};
         size_t send_buf_size = snprintf(
-                send_buf, SEND_HEADER_CAP,
+                send_header_buf, g_send_header_cap,
                 "%s\r\n"
                 "Content-Type: %s\r\n"
                 "Content-Length: %ld\r\n"
@@ -548,20 +550,20 @@ handle_connection(
                 header_type,
                 mime_type_default(url),
                 file_entry->filedata_size);
-        if(send_buf_size > SEND_HEADER_CAP)
+        if(send_buf_size > g_send_header_cap)
         {
             log("failed to write header\n");
-            goto EXIT_REQUEST_SSL;
+            goto FINISH_REQUEST_SSL;
         }
-        if(!socket_send_all(ssl, send_buf, send_buf_size))
+        if(!socket_send_all(ssl, send_header_buf, send_buf_size))
         {
-            goto EXIT_REQUEST_SSL;
+            goto FINISH_REQUEST_SSL;
         }
 
         // send file
         socket_send_all(ssl, file_entry->filedata, file_entry->filedata_size);
 
-EXIT_REQUEST_SSL:
+FINISH_REQUEST_SSL:;
         ssl_error = ERR_get_error();
         if (ssl_error != SSL_ERROR_SYSCALL && ssl_error != SSL_ERROR_SSL)
         {
@@ -570,11 +572,13 @@ EXIT_REQUEST_SSL:
 
         SSL_free(ssl);
 
-EXIT_REQUEST:
+FINISH_REQUEST:;
         if(close(client_fd) < 0) {die("failed to close client fd");}
         client_fd = -1;
     }
 
+EXIT:;
+    g_is_server_running = 0;
     return(NULL);
 }
 
@@ -588,16 +592,18 @@ main(
     struct sockaddr_in server_addr = {0};
     size_t thread_count = 16;
     size_t file_cache_size = 256;
-    uint8_t no_console = 0;
 
-    _is_server_running = 1;
+    g_recv_buffer_cap = 8192;
+    g_send_header_cap = 4096;
 
     // init locks
-    sem_init(&_lock_die, 0, 1);
-    sem_init(&_lock_server, 0, 1);
+    sem_init(&g_lock_die, 0, 1);
+    sem_init(&g_lock_server, 0, 1);
 
     // args
-    for (char **arg = argv; *arg != NULL; arg++)
+    for (char **arg = argv;
+            *arg != NULL && argc-- > 1;
+            arg++)
     {
         char *end_ptr;
         if(strncmp(*arg, "-p", sizeof("-p") - 1) == 0)
@@ -624,15 +630,10 @@ main(
             else {die("failed to parse -c option\n");}
             if(file_cache_size <= 0) {die("-c must be >0");}
         }
-        else if(strncmp(*arg, "-n", sizeof("-n") - 1) == 0)
-        {
-            no_console = 1;
-        }
     }
     log("options: port: %d\n", server_port);
     log("options: thread count: %ld\n", thread_count);
     log("options: file cache size: %ld\n", file_cache_size);
-    log("options: no console: %d\n", no_console);
 
     // ignore SIGPIPE
     struct sigaction act = {0};
@@ -644,10 +645,27 @@ main(
         diep("sigaction failed to bind SIGPIPE");
     }
 
+    memset(&act, 0, sizeof(act));
+    act.sa_flags = SA_RESTART;
+    act.sa_handler = signal_handle_int;
+    if(sigaction(SIGINT, &act, NULL) == -1)
+    {
+        diep("sigaction failed to bind SIGINT");
+    }
+
     // get socket
-    if((_server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+    if((g_server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
     {
         diep("failed to create server socket");
+    }
+
+    // non blocking
+    {
+        int flags = fcntl(g_server_fd, F_GETFL, 0);
+        if(fcntl(g_server_fd, F_SETFL, flags | O_NONBLOCK) == -1)
+        {
+            diep("failed to set socket to NONBLOCK");
+        }
     }
 
     server_addr.sin_family = AF_INET;
@@ -655,7 +673,7 @@ main(
     server_addr.sin_port = htons(server_port);
 
     int sockopt_enable = 1;
-    if (setsockopt(_server_fd,
+    if (setsockopt(g_server_fd,
                 SOL_SOCKET,
                 SO_REUSEADDR,
                 &sockopt_enable,
@@ -665,14 +683,14 @@ main(
     }
 
     // port
-    if(bind(_server_fd,
+    if(bind(g_server_fd,
                 (struct sockaddr *)&server_addr,
                 sizeof(server_addr)) < 0)
     {
         diep("failed to bind server socket to port");
     }
 
-    if(listen(_server_fd, server_queue_size) < 0)
+    if(listen(g_server_fd, server_queue_size) < 0)
     {
         diep("failed to listen to server socket");
     }
@@ -682,19 +700,19 @@ main(
     atexit(close_server);
 
     // create and configure SSL context
-    if ((_ssl_ctx = SSL_CTX_new(TLS_server_method())) == NULL)
+    if ((g_ssl_ctx = SSL_CTX_new(TLS_server_method())) == NULL)
     {
         die("failed to create SSL context\n");
     }
-    if (!SSL_CTX_use_certificate_chain_file(_ssl_ctx, FILE_CERT))
+    if (!SSL_CTX_use_certificate_chain_file(g_ssl_ctx, FILE_CERT))
     {
         die("failed to link certification to SSL context\n");
     }
-    if (!SSL_CTX_use_PrivateKey_file(_ssl_ctx, FILE_CERT_PRIVATE_KEY, SSL_FILETYPE_PEM))
+    if (!SSL_CTX_use_PrivateKey_file(g_ssl_ctx, FILE_CERT_PRIVATE_KEY, SSL_FILETYPE_PEM))
     {
         die("failed to link private key to SSL context\n");
     }
-    if (!SSL_CTX_check_private_key(_ssl_ctx))
+    if (!SSL_CTX_check_private_key(g_ssl_ctx))
     {
         die("private key validity check failed\n");
     }
@@ -702,20 +720,16 @@ main(
 
     // we only serve from the public directory
     chdir("public/");
-    if(getcwd(_curr_dir, PATH_MAX) == NULL)
-    {
-        diep("failed to get current directory");
-    }
 
     // setup blacklist paths
     glob_t blacklisted = {0};
     for(size_t i = 0;
-            i < static_array_size(_blacklisted_config);
+            i < static_array_size(g_blacklisted_config);
             i++)
     {
         int flags = GLOB_MARK | GLOB_NOSORT;
         if(i != 0) {flags |= GLOB_APPEND;}
-        glob(_blacklisted_config[i], flags, NULL, &blacklisted);
+        glob(g_blacklisted_config[i], flags, NULL, &blacklisted);
     }
     // remove trailing slash
     for(size_t i = 0;
@@ -729,8 +743,8 @@ main(
         }
     }
 
-    hashtable_init(&_file_cache, file_cache_size);
-    file_cache_add_dir(".", sizeof(".") - 1, blacklisted);
+    hashtable_init(&g_file_cache, file_cache_size);
+    file_cache_add_dir(".", blacklisted);
 
     globfree(&blacklisted);
 
@@ -749,55 +763,12 @@ main(
         }
     }
 
-    // console loop
-    char *line = NULL;
-    size_t line_capacity = 0;
-    ssize_t line_size = 0;
-
-    // TODO(andrew): raw mode
-    if(no_console)
+    for(size_t i = 0; i < thread_count; i++)
     {
-        for(size_t i = 0; i < thread_count; i++)
-        {
-            pthread_join(thread_ids[i], NULL);
-        }
-    }
-    else
-    {
-        while(_is_server_running)
-        {
-            fwrite("$ ", 1, 2, stdout);
-            fflush(stdout);
-
-            line_size = getline(&line, &line_capacity, stdin);
-            while(line_size > 0
-                    && (line[line_size - 1] == '\n'
-                        || line[line_size - 1] == '\r'))
-            {
-                line_size--;
-            }
-
-            if(line_size == -1 || strncmp(line, "exit", line_size) == 0)
-            {
-                _is_server_running = 0;
-                goto EXIT;
-            }
-            else if(strncmp(line, "clear", line_size) == 0)
-            {
-                char *msg = "\033[2J\033[H";
-                printf("%s", msg);
-            }
-            // TODO(andrew): allow reloading of the file system
-        }
+        pthread_join(thread_ids[i], NULL);
     }
 
-EXIT:
-    _is_server_running = 0;
-
-    if(line != NULL) {free(line);}
-    log("server is closing\n");
-
-    hashtable_destroy(&_file_cache);
+    hashtable_destroy(&g_file_cache);
 
     return(0);
 }
