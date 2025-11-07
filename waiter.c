@@ -22,6 +22,7 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
+#include "argparse.h"
 #include "waiter_mime.c"
 
 #define PROGRAM_NAME "waiter"
@@ -587,7 +588,7 @@ main(
         int argc,
         char **argv)
 {
-    uint16_t server_port = 8080;
+    int server_port = 8080;
     int server_queue_size = 4096;
     struct sockaddr_in server_addr = {0};
     size_t thread_count = 16;
@@ -601,36 +602,19 @@ main(
     sem_init(&g_lock_server, 0, 1);
 
     // args
-    for (char **arg = argv;
-            *arg != NULL && argc-- > 1;
-            arg++)
+    argparse_loop(argc, i)
     {
-        char *end_ptr;
-        if(strncmp(*arg, "-p", sizeof("-p") - 1) == 0)
-        {
-            char *arg_offset = (*arg) + sizeof("-p") - 1;
-            uint16_t temp = strtol(arg_offset, &end_ptr, 10);
-            if(end_ptr != arg_offset && errno == 0) {server_port = temp;}
-            else {die("failed to parse -p option\n");}
-            if(server_port <= 0) {die("-p must be >0");}
-        }
-        else if(strncmp(*arg, "-t", sizeof("-t") - 1) == 0)
-        {
-            char *arg_offset = (*arg) + sizeof("-t") - 1;
-            size_t temp = strtol(arg_offset, &end_ptr, 10);
-            if(end_ptr != arg_offset && errno == 0) {thread_count = temp;}
-            else {die("failed to parse -t option\n");}
-            if(thread_count <= 0) {die("-t must be >0");}
-        }
-        else if(strncmp(*arg, "-c", sizeof("-c") - 1) == 0)
-        {
-            char *arg_offset = (*arg) + sizeof("-c") - 1;
-            size_t temp = strtol(arg_offset, &end_ptr, 10);
-            if(end_ptr != arg_offset && errno == 0) {file_cache_size = temp;}
-            else {die("failed to parse -c option\n");}
-            if(file_cache_size <= 0) {die("-c must be >0");}
-        }
+        argparse_exit_short_long(
+                argparse_conv_d, "-p", "--port", &server_port, argc, argv, i);
+        argparse_exit_short_long(
+                argparse_conv_ul, "-t", "--thread-count", &thread_count, argc, argv, i);
+        argparse_exit_short_long(
+                argparse_conv_ul, "-f", "--file-cache-size", &file_cache_size, argc, argv, i);
+        die("unknown argument: %s\n", argv[i]);
     }
+    if(server_port <= 0) {die("-p must be >0");}
+    if(thread_count <= 0) {die("-t must be >0");}
+    if(file_cache_size <= 0) {die("-c must be >0");}
     log("options: port: %d\n", server_port);
     log("options: thread count: %ld\n", thread_count);
     log("options: file cache size: %ld\n", file_cache_size);
@@ -670,7 +654,7 @@ main(
 
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(server_port);
+    server_addr.sin_port = htons((uint16_t)server_port);
 
     int sockopt_enable = 1;
     if (setsockopt(g_server_fd,
