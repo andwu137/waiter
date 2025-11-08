@@ -593,6 +593,7 @@ main(
     struct sockaddr_in server_addr = {0};
     size_t thread_count = 16;
     size_t file_cache_size = 256;
+    char *target_directory = "public/";
 
     g_recv_buffer_cap = 8192;
     g_send_header_cap = 4096;
@@ -610,14 +611,18 @@ main(
                 argparse_conv_ul, "-t", "--thread-count", &thread_count, argc, argv, i);
         argparse_exit_short_long(
                 argparse_conv_ul, "-f", "--file-cache-size", &file_cache_size, argc, argv, i);
+        argparse_exit_short_long(
+                argparse_conv_s, "-d", "--directory", &target_directory, argc, argv, i);
         die("unknown argument: %s\n", argv[i]);
     }
-    if(server_port <= 0) {die("-p must be >0");}
-    if(thread_count <= 0) {die("-t must be >0");}
-    if(file_cache_size <= 0) {die("-c must be >0");}
+    if(server_port <= 0) {die("--port must be >0");}
+    if(thread_count <= 0) {die("--thread-count must be >0");}
+    if(file_cache_size <= 0) {die("--file-cache-size must be >0");}
+    if(target_directory[0] == 0) {die("--directory must be non-empty");}
     log("options: port: %d\n", server_port);
     log("options: thread count: %ld\n", thread_count);
     log("options: file cache size: %ld\n", file_cache_size);
+    log("options: directory: '%s'\n", target_directory);
 
     // ignore SIGPIPE
     struct sigaction act = {0};
@@ -703,7 +708,10 @@ main(
     atexit(close_SSL_context);
 
     // we only serve from the public directory
-    chdir("public/");
+    if(chdir(target_directory) == -1)
+    {
+        diep("failed to change directory to target directory");
+    }
 
     // setup blacklist paths
     glob_t blacklisted = {0};
@@ -747,6 +755,7 @@ main(
         }
     }
 
+    // wait for threads to end
     for(size_t i = 0; i < thread_count; i++)
     {
         pthread_join(thread_ids[i], NULL);

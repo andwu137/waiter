@@ -47,7 +47,7 @@ argparse_conv_d(
 {
 	char *end_ptr;
 	*out = strtod(in, &end_ptr);
-	return end_ptr != NULL && errno == 0;
+	return end_ptr != NULL && errno == 0; // WARN(andrew): is that right?
 }
 
 static inline int
@@ -57,7 +57,7 @@ argparse_conv_l(
 {
 	char *end_ptr;
 	*out = strtol(in, &end_ptr, 10);
-	return end_ptr == in + strlen(in) && errno == 0;
+	return end_ptr == in + strlen(in) && errno == 0; // WARN(andrew): is that right?
 }
 
 static inline int
@@ -67,7 +67,16 @@ argparse_conv_ul(
 {
 	char *end_ptr;
 	*out = strtoul(in, &end_ptr, 10);
-	return end_ptr == in + strlen(in) && errno == 0;
+	return end_ptr == in + strlen(in) && errno == 0; // WARN(andrew): is that right?
+}
+
+static inline int
+argparse_conv_s(
+		char **out,
+		char *in)
+{
+	*out = in;
+	return 1;
 }
 
 static inline void
