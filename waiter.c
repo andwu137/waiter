@@ -34,6 +34,8 @@
 #define static_array_size(arr) (sizeof(arr) / sizeof(*(arr)))
 #define socket_send_static_array(ssl, arr) socket_send_all(ssl, arr, sizeof(arr))
 
+#define NANOSECONDS_PER_SECOND 1000000000ll
+
 // constants
 #if defined(DEBUG)
 #   define HTTP_HEADER_CACHE "Clear-Site-Data: \"*\"\r\n"
@@ -214,7 +216,7 @@ file_cache_add_dir(
         char path[PATH_MAX];
 
         // blacklisted prefixes
-        if (strcmp(dir_ent->d_name, ".") == 0
+        if(strcmp(dir_ent->d_name, ".") == 0
                 || strcmp(dir_ent->d_name, "..") == 0)
         {
             continue;
@@ -370,8 +372,13 @@ RESUME:;
 
         // get wait time
         struct timespec client_wait_time = {0};
-        if (clock_gettime(CLOCK_REALTIME, &client_wait_time) == -1) {goto EXIT;}
-        client_wait_time.tv_sec += 1;
+        if(clock_gettime(CLOCK_REALTIME, &client_wait_time) == -1) {goto EXIT;}
+        client_wait_time.tv_nsec += NANOSECONDS_PER_SECOND * 0.01;
+        while(client_wait_time.tv_nsec >= NANOSECONDS_PER_SECOND)
+        {
+            client_wait_time.tv_nsec -= NANOSECONDS_PER_SECOND;
+            client_wait_time.tv_sec += 1;
+        }
 
         // try to get the lock
         {
@@ -417,12 +424,12 @@ RESUME:;
             log("failed to create SSL connection struct\n");
             goto FINISH_REQUEST;
         }
-        if (!SSL_set_fd(ssl, client_fd))
+        if(!SSL_set_fd(ssl, client_fd))
         {
             log("failed to link client fd to SSL connection struct\n");
             goto FINISH_REQUEST_SSL;
         }
-        if (SSL_accept(ssl) <= 0)
+        if(SSL_accept(ssl) <= 0)
         {
             log("SSL connection rejected due bad client / internal error\n");
             goto FINISH_REQUEST_SSL;
@@ -566,7 +573,7 @@ RESUME:;
 
 FINISH_REQUEST_SSL:;
         ssl_error = ERR_get_error();
-        if (ssl_error != SSL_ERROR_SYSCALL && ssl_error != SSL_ERROR_SSL)
+        if(ssl_error != SSL_ERROR_SYSCALL && ssl_error != SSL_ERROR_SSL)
         {
             SSL_shutdown(ssl);
         }
@@ -662,7 +669,7 @@ main(
     server_addr.sin_port = htons((uint16_t)server_port);
 
     int sockopt_enable = 1;
-    if (setsockopt(g_server_fd,
+    if(setsockopt(g_server_fd,
                 SOL_SOCKET,
                 SO_REUSEADDR,
                 &sockopt_enable,
@@ -689,19 +696,19 @@ main(
     atexit(close_server);
 
     // create and configure SSL context
-    if ((g_ssl_ctx = SSL_CTX_new(TLS_server_method())) == NULL)
+    if((g_ssl_ctx = SSL_CTX_new(TLS_server_method())) == NULL)
     {
         die("failed to create SSL context\n");
     }
-    if (!SSL_CTX_use_certificate_chain_file(g_ssl_ctx, FILE_CERT))
+    if(!SSL_CTX_use_certificate_chain_file(g_ssl_ctx, FILE_CERT))
     {
         die("failed to link certification to SSL context\n");
     }
-    if (!SSL_CTX_use_PrivateKey_file(g_ssl_ctx, FILE_CERT_PRIVATE_KEY, SSL_FILETYPE_PEM))
+    if(!SSL_CTX_use_PrivateKey_file(g_ssl_ctx, FILE_CERT_PRIVATE_KEY, SSL_FILETYPE_PEM))
     {
         die("failed to link private key to SSL context\n");
     }
-    if (!SSL_CTX_check_private_key(g_ssl_ctx))
+    if(!SSL_CTX_check_private_key(g_ssl_ctx))
     {
         die("private key validity check failed\n");
     }
